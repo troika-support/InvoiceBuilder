@@ -1,6 +1,7 @@
 using InvoiceBuilder.Application.Payments;
 using InvoiceBuilder.Domain.Common;
 using InvoiceBuilder.Domain.Payments;
+using InvoiceBuilder.Domain.ValueObjects;
 using InvoiceBuilder.Infrastructure.Payments.Paynow;
 
 namespace InvoiceBuilder.Infrastructure.Payments.Fake;
@@ -42,7 +43,7 @@ public sealed class FakePaymentGateway(FakePaymentState state) : IPaymentGateway
     public Task<Result<PaymentInitiation>> InitiateMobileAsync(PaymentRequest request, string phone, MobileMethod method, CancellationToken ct) =>
         Task.FromResult(Initiate(request, "Open /dev/payments to simulate approving the prompt on the phone."));
 
-    public Task<Result<GatewayStatus>> CheckStatusAsync(Guid businessId, string pollUrl, CancellationToken ct)
+    public Task<Result<GatewayStatus>> CheckStatusAsync(Guid businessId, CurrencyCode currency, string pollUrl, CancellationToken ct)
     {
         var status = state.Get(pollUrl);
         return Task.FromResult(status is null
@@ -50,7 +51,7 @@ public sealed class FakePaymentGateway(FakePaymentState state) : IPaymentGateway
             : Result.Success(status));
     }
 
-    public bool VerifyCallback(Guid businessId, IReadOnlyDictionary<string, string> fields) =>
+    public bool VerifyCallback(Guid businessId, CurrencyCode currency, IReadOnlyDictionary<string, string> fields) =>
         PaynowHash.Verify(fields, IntegrationKey);
 
     private Result<PaymentInitiation> Initiate(PaymentRequest request, string instructions)

@@ -1,4 +1,5 @@
 using InvoiceBuilder.Domain.Common;
+using InvoiceBuilder.Domain.ValueObjects;
 
 namespace InvoiceBuilder.Domain.Payments;
 
@@ -8,7 +9,8 @@ public enum PaymentProvider
 }
 
 /// <summary>
-/// One business's gateway integration. The key is stored encrypted (Data Protection) and never exposed.
+/// One business's gateway integration for one currency: Paynow issues a separate integration ID and key per currency,
+/// so a business that bills in USD and ZiG has two rows. The key is stored encrypted (Data Protection) and never exposed.
 /// ResultUrl and ReturnUrl are computed from the public base URL, not stored.
 /// </summary>
 public sealed class PaymentGatewayConfig : BusinessEntity
@@ -18,6 +20,8 @@ public sealed class PaymentGatewayConfig : BusinessEntity
     }
 
     public PaymentProvider Provider { get; private set; }
+
+    public CurrencyCode Currency { get; private set; } = CurrencyCode.Usd;
 
     public string IntegrationId { get; private set; } = string.Empty;
 
@@ -32,7 +36,8 @@ public sealed class PaymentGatewayConfig : BusinessEntity
         string integrationId,
         string integrationKeyEncrypted,
         bool isLive,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        CurrencyCode? currency = null)
     {
         if (string.IsNullOrWhiteSpace(integrationId))
         {
@@ -49,6 +54,7 @@ public sealed class PaymentGatewayConfig : BusinessEntity
             TenantId = tenantId,
             BusinessId = businessId,
             Provider = provider,
+            Currency = currency ?? CurrencyCode.Usd,
             IntegrationId = integrationId.Trim(),
             IntegrationKeyEncrypted = integrationKeyEncrypted,
             IsLive = isLive,

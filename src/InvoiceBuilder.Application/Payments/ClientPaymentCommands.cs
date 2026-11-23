@@ -29,7 +29,8 @@ public sealed class StartClientPaymentHandler(
             return Result.Failure<StartedPayment>(ClientLinkErrors.Invalid);
         }
 
-        if (await gateways.GetForWebhookAsync(invoice.BusinessId, PaymentProvider.Paynow, cancellationToken) is null)
+        // Paynow issues one integration per currency: no integration for the invoice's currency means no online payment.
+        if (await gateways.GetForWebhookAsync(invoice.BusinessId, PaymentProvider.Paynow, invoice.Currency, cancellationToken) is null)
         {
             return Result.Failure<StartedPayment>(new Error("Payment.NotAvailable", "Online payment isn't available for this invoice."));
         }
@@ -55,7 +56,6 @@ public sealed class StartClientPaymentHandler(
             payerEmail = (await clients.GetByIdAsync(invoice.ClientId, cancellationToken))?.Email;
         }
 
-        // Paynow supports USD and ZWG, the only currencies in the app (paynow.md section 6), so no extra currency check is needed.
         return await sender.Send(
             new StartOnlinePaymentCommand(invoice.Id, amount, request.Method, request.Phone, payerEmail?.Trim() ?? string.Empty, request.Token, request.NextInstalment),
             cancellationToken);

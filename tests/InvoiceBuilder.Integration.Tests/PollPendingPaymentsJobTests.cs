@@ -36,7 +36,7 @@ public sealed class PollPendingPaymentsJobTests
     {
         PendingPayment(TimeSpan.FromSeconds(30));
         await Job().RunAsync(CancellationToken.None);
-        await _gateway.DidNotReceive().CheckStatusAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await _gateway.DidNotReceive().CheckStatusAsync(Arg.Any<Guid>(), Arg.Any<CurrencyCode>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -44,7 +44,7 @@ public sealed class PollPendingPaymentsJobTests
     {
         var payment = PendingPayment(TimeSpan.FromMinutes(5));
         var status = new GatewayStatus(payment.Reference, "P1", payment.Amount, GatewayState.Paid);
-        _gateway.CheckStatusAsync(payment.BusinessId, "https://poll", Arg.Any<CancellationToken>()).Returns(Result.Success(status));
+        _gateway.CheckStatusAsync(payment.BusinessId, CurrencyCode.Usd, "https://poll", Arg.Any<CancellationToken>()).Returns(Result.Success(status));
         await Job().RunAsync(CancellationToken.None);
         await _sender.Received(1).Send(Arg.Is<ConfirmOnlinePaymentCommand>(c => c.PaymentId == payment.Id && c.Status == status), Arg.Any<CancellationToken>());
     }
@@ -54,7 +54,7 @@ public sealed class PollPendingPaymentsJobTests
     {
         var payment = PendingPayment(TimeSpan.FromHours(25));
         await Job().RunAsync(CancellationToken.None);
-        await _gateway.DidNotReceive().CheckStatusAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await _gateway.DidNotReceive().CheckStatusAsync(Arg.Any<Guid>(), Arg.Any<CurrencyCode>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
         await _sender.Received(1).Send(Arg.Is<ConfirmOnlinePaymentCommand>(c => c.PaymentId == payment.Id && c.Status.State == GatewayState.Failed), Arg.Any<CancellationToken>());
     }
 
@@ -62,7 +62,7 @@ public sealed class PollPendingPaymentsJobTests
     public async Task R19_gateway_failure_leaves_the_payment_pending()
     {
         var payment = PendingPayment(TimeSpan.FromMinutes(5));
-        _gateway.CheckStatusAsync(payment.BusinessId, "https://poll", Arg.Any<CancellationToken>())
+        _gateway.CheckStatusAsync(payment.BusinessId, CurrencyCode.Usd, "https://poll", Arg.Any<CancellationToken>())
             .Returns(Result.Failure<GatewayStatus>(new Error("Gateway.Down", "down")));
         await Job().RunAsync(CancellationToken.None);
         await _sender.DidNotReceive().Send(Arg.Any<ConfirmOnlinePaymentCommand>(), Arg.Any<CancellationToken>());

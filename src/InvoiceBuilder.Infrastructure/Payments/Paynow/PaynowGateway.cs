@@ -4,6 +4,7 @@ using InvoiceBuilder.Application.Options;
 using InvoiceBuilder.Application.Payments;
 using InvoiceBuilder.Domain.Common;
 using InvoiceBuilder.Domain.Payments;
+using InvoiceBuilder.Domain.ValueObjects;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -30,9 +31,9 @@ public sealed partial class PaynowGateway(
     public Task<Result<PaymentInitiation>> InitiateMobileAsync(PaymentRequest request, string phone, MobileMethod method, CancellationToken ct) =>
         InitiateAsync(request, MobilePath, (phone, method), ct);
 
-    public async Task<Result<GatewayStatus>> CheckStatusAsync(Guid businessId, string pollUrl, CancellationToken ct)
+    public async Task<Result<GatewayStatus>> CheckStatusAsync(Guid businessId, CurrencyCode currency, string pollUrl, CancellationToken ct)
     {
-        var config = await configs.GetAsync(businessId, PaymentProvider.Paynow, ct);
+        var config = await configs.GetAsync(businessId, PaymentProvider.Paynow, currency, ct);
         if (config is null)
         {
             return Result.Failure<GatewayStatus>(NotConfigured);
@@ -66,13 +67,23 @@ public sealed partial class PaynowGateway(
             status.FlagForReview));
     }
 
-    public bool VerifyCallback(Guid businessId, IReadOnlyDictionary<string, string> fields)
+    public bool VerifyCallback(Guid businessId, CurrencyCode currency, IReadOnlyDictionary<string, string> fields)
     {
-        var config = configs.Find(businessId, PaymentProvider.Paynow);
+        var config = configs.Find(businessId, PaymentProvider.Paynow, currency);
         return config is not null && PaynowHash.Verify(fields, secrets.Unprotect(config.IntegrationKeyEncrypted));
     }
 
     private static Error NotConfigured { get; } = new("Paynow.NotConfigured", "Online payments are not set up for this business.");
+
+    /// <summary>
+    /// Paynow posts status updates here. The currency is in the path because each currency has its own integration
+    /// key, and the callback hash can only be checked with the key of the integration that started the payment.
+    /// </summary>
+    public static string ResultPath(Guid businessId, CurrencyCode currency)
+    {
+        ArgumentNullException.ThrowIfNull(currency);
+        return $"/webhooks/paynow/{businessId}/{currency.Code.ToLowerInvariant()}";
+    }
 
     private static string? Get(IReadOnlyDictionary<string, string> fields, string name) =>
         fields.FirstOrDefault(f => f.Key.Equals(name, StringComparison.OrdinalIgnoreCase)).Value;
@@ -83,7 +94,11 @@ public sealed partial class PaynowGateway(
         (string Phone, MobileMethod Method)? mobile,
         CancellationToken ct)
     {
-        var config = await configs.GetAsync(request.BusinessId, PaymentProvider.Paynow, ct);
+        // Paynow issues a separate integration per currency, so the invoice's currency picks the integration.
+        var currency = CurrencyCode.Create(request.Currency);
+        var config = currency.IsSuccess
+            ? await configs.GetAsync(request.BusinessId, PaymentProvider.Paynow, currency.Value, ct)
+            : null;
         if (config is null)
         {
             return Result.Failure<PaymentInitiation>(NotConfigured);
@@ -102,7 +117,7 @@ public sealed partial class PaynowGateway(
             ["returnurl"] = request.ClientToken is { Length: > 0 } clientToken
                 ? $"{baseUrl}/d/{Uri.EscapeDataString(clientToken)}/paid?payment={request.PaymentId}"
                 : $"{baseUrl}/d/{request.PaymentId}/paid",
-            ["resulturl"] = $"{baseUrl}/webhooks/paynow/{request.BusinessId}",
+            ["resulturl"] = baseUrl + ResultPath(request.BusinessId, config.Currency),
         };
         if (AuthEmail(request, config.IsLive, mobile is not null) is { } authEmail)
         {

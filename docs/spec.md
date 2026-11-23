@@ -191,7 +191,7 @@ Personal data: client names, emails, phones, addresses and quote signer names/IP
 - Secrets: `dotnet user-secrets` in development; IIS app-pool environment variables in production (set by a PowerShell script); `ValidateOnStart` on all options. Per-business secrets (Paynow key, WhatsApp token) encrypted in the database with ASP.NET Data Protection; key ring persisted to `[path]` and protected with DPAPI-NG / certificate.
 - Logging: Serilog to rolling files + SQL Server sink optional; correlation ID per request.
 - Health checks: `/health/live`, `/health/ready` (DB, Hangfire, Playwright browser available).
-- Public endpoints: `/d/{token}` client links and `/webhooks/paynow/{businessId}`; both rate-limited.
+- Public endpoints: `/d/{token}` client links and `/webhooks/paynow/{businessId}/{currency}`; both rate-limited.
 
 ## 8. Licences to confirm
 

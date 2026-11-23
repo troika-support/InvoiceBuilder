@@ -61,7 +61,7 @@ public sealed class ClientLinkControllerTests
         var client = Client.Create(invoice.TenantId, invoice.BusinessId, "Jane", CurrencyCode.Usd, Now).Value;
         client.UpdateContact(null, "0771<b>234", null, null, null, Now);
         _clients.GetByIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(client);
-        _gateways.GetForWebhookAsync(invoice.BusinessId, PaymentProvider.Paynow, Arg.Any<CancellationToken>()).Returns(PaymentGatewayConfig.Create(invoice.TenantId, invoice.BusinessId, PaymentProvider.Paynow, "1", "key", false, Now).Value);
+        _gateways.GetForWebhookAsync(invoice.BusinessId, PaymentProvider.Paynow, invoice.Currency, Arg.Any<CancellationToken>()).Returns(PaymentGatewayConfig.Create(invoice.TenantId, invoice.BusinessId, PaymentProvider.Paynow, "1", "key", false, Now).Value);
         _html.RenderAsync(Arg.Any<Document>(), Arg.Any<Guid>(), Arg.Any<string?>(), Arg.Any<CancellationToken>()).Returns(Result.Success("<html><head></head><body></body></html>"));
 
         var result = await Controller().View("tok", CancellationToken.None);

@@ -70,7 +70,7 @@ public sealed partial class PollPendingPaymentsJob(
                 continue;
             }
 
-            var status = await gateway.CheckStatusAsync(businessId, payment.PollUrl, cancellationToken);
+            var status = await gateway.CheckStatusAsync(businessId, payment.Currency, payment.PollUrl, cancellationToken);
             if (status.IsFailure)
             {
                 LogStatusFailed(logger, payment.Id);

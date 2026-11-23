@@ -1,6 +1,7 @@
 using InvoiceBuilder.Application.Abstractions;
 using InvoiceBuilder.Application.Payments;
 using InvoiceBuilder.Domain.Payments;
+using InvoiceBuilder.Domain.ValueObjects;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
@@ -10,6 +11,9 @@ namespace InvoiceBuilder.Web.Controllers;
 /// <summary>
 /// Paynow result callback (paynow.md section 3 and 7). Anonymous, form-only, rate limited.
 /// The body is never trusted: the hash is verified, then the status is polled from Paynow.
+/// Each currency has its own Paynow integration and key, so the result URL names the currency
+/// (<c>/webhooks/paynow/{businessId}/{currency}</c>). The older URL without a currency is kept for payments started
+/// before integrations were split by currency; those were all made with the integration now saved as USD.
 /// </summary>
 [ApiController]
 [Route("webhooks/paynow")]
@@ -26,7 +30,25 @@ public sealed partial class PaynowWebhookController(
     [HttpPost("{businessId:guid}")]
     [Consumes("application/x-www-form-urlencoded")]
     [EnableRateLimiting(RateLimitPolicy)]
-    public async Task<IActionResult> Receive(Guid businessId, CancellationToken cancellationToken)
+    public Task<IActionResult> ReceiveLegacy(Guid businessId, CancellationToken cancellationToken) =>
+        ReceiveAsync(businessId, CurrencyCode.Usd, cancellationToken);
+
+    [HttpPost("{businessId:guid}/{currency}")]
+    [Consumes("application/x-www-form-urlencoded")]
+    [EnableRateLimiting(RateLimitPolicy)]
+    public async Task<IActionResult> Receive(Guid businessId, string currency, CancellationToken cancellationToken)
+    {
+        var code = CurrencyCode.Create(currency);
+        if (code.IsFailure)
+        {
+            LogRejected(businessId);
+            return BadRequest();
+        }
+
+        return await ReceiveAsync(businessId, code.Value, cancellationToken);
+    }
+
+    private async Task<IActionResult> ReceiveAsync(Guid businessId, CurrencyCode currency, CancellationToken cancellationToken)
     {
         // Read the raw body: the hash covers the values in the order Paynow sent them, which Request.Form doesn't promise.
         string body;
@@ -37,7 +59,7 @@ public sealed partial class PaynowWebhookController(
 
         var fields = InvoiceBuilder.Infrastructure.Payments.Paynow.PaynowGateway.ParseForm(body);
 
-        var config = await configs.GetForWebhookAsync(businessId, PaymentProvider.Paynow, cancellationToken);
+        var config = await configs.GetForWebhookAsync(businessId, PaymentProvider.Paynow, currency, cancellationToken);
         if (config is null)
         {
             LogRejected(businessId);
@@ -46,7 +68,7 @@ public sealed partial class PaynowWebhookController(
 
         scope.UseScope(config.TenantId, config.BusinessId);
 
-        if (!gateway.VerifyCallback(businessId, fields))
+        if (!gateway.VerifyCallback(businessId, currency, fields))
         {
             LogRejected(businessId);
             return BadRequest();
@@ -64,7 +86,8 @@ public sealed partial class PaynowWebhookController(
             return Ok();
         }
 
-        var status = await gateway.CheckStatusAsync(businessId, payment.PollUrl, cancellationToken);
+        // Poll with the integration whose key verified this callback: it is the one that started the payment.
+        var status = await gateway.CheckStatusAsync(businessId, currency, payment.PollUrl, cancellationToken);
         if (status.IsFailure)
         {
             LogStatusFailed(payment.Id);

@@ -4,12 +4,19 @@ using InvoiceBuilder.Application.Payments;
 using InvoiceBuilder.Domain.Businesses;
 using InvoiceBuilder.Domain.Common;
 using InvoiceBuilder.Domain.Payments;
+using InvoiceBuilder.Domain.ValueObjects;
 using MediatR;
 
 namespace InvoiceBuilder.Application.Businesses.Settings;
 
-/// <summary>Secrets never appear here: only whether one is saved.</summary>
-public sealed record PaymentSettings(string PaynowIntegrationId, bool PaynowKeySaved, bool IsLive, string BankDetails);
+/// <summary>One Paynow integration. Secrets never appear here: only whether one is saved.</summary>
+public sealed record PaynowIntegrationSettings(string IntegrationId, bool KeySaved, bool IsLive)
+{
+    public static PaynowIntegrationSettings None { get; } = new(string.Empty, false, false);
+}
+
+/// <summary>Paynow issues a separate integration ID and key for each currency, so USD and ZiG are set up separately.</summary>
+public sealed record PaymentSettings(PaynowIntegrationSettings Usd, PaynowIntegrationSettings Zwg, string BankDetails);
 
 public sealed record GetPaymentSettingsQuery : IRequest<Result<PaymentSettings>>;
 
@@ -25,29 +32,47 @@ public sealed class GetPaymentSettingsHandler(
             return Result.Failure<PaymentSettings>(BusinessSettingsErrors.NoBusiness);
         }
 
-        var gateway = await gateways.GetAsync(businessId, PaymentProvider.Paynow, cancellationToken);
+        var usd = await gateways.GetAsync(businessId, PaymentProvider.Paynow, CurrencyCode.Usd, cancellationToken);
+        var zwg = await gateways.GetAsync(businessId, PaymentProvider.Paynow, CurrencyCode.Zwg, cancellationToken);
         var other = await settings.GetAsync(businessId, cancellationToken);
-        return Result.Success(new PaymentSettings(
-            gateway?.IntegrationId ?? string.Empty,
-            gateway is { IntegrationKeyEncrypted.Length: > 0 },
-            gateway?.IsLive ?? false,
-            other?.BankDetails ?? string.Empty));
+        return Result.Success(new PaymentSettings(ToSettings(usd), ToSettings(zwg), other?.BankDetails ?? string.Empty));
     }
+
+    private static PaynowIntegrationSettings ToSettings(PaymentGatewayConfig? gateway) =>
+        gateway is null
+            ? PaynowIntegrationSettings.None
+            : new PaynowIntegrationSettings(gateway.IntegrationId, gateway.IntegrationKeyEncrypted.Length > 0, gateway.IsLive);
 }
 
-/// <summary>A blank <see cref="NewIntegrationKey"/> keeps the saved key.</summary>
-public sealed record UpdatePaymentSettingsCommand(string PaynowIntegrationId, string? NewIntegrationKey, bool IsLive, string BankDetails)
+/// <summary>What the owner typed for one currency's integration. A blank <see cref="NewIntegrationKey"/> keeps the saved key.</summary>
+public sealed record PaynowIntegrationInput(string IntegrationId, string? NewIntegrationKey, bool IsLive)
+{
+    public static PaynowIntegrationInput Blank { get; } = new(string.Empty, null, false);
+
+    public override string ToString() => nameof(PaynowIntegrationInput);
+}
+
+public sealed record UpdatePaymentSettingsCommand(PaynowIntegrationInput Usd, PaynowIntegrationInput Zwg, string BankDetails)
     : ITransactionalCommand<Result>
 {
     public override string ToString() => nameof(UpdatePaymentSettingsCommand);
+}
+
+public sealed class PaynowIntegrationInputValidator : AbstractValidator<PaynowIntegrationInput>
+{
+    public PaynowIntegrationInputValidator()
+    {
+        RuleFor(c => c.IntegrationId).MaximumLength(100);
+        RuleFor(c => c.NewIntegrationKey).MaximumLength(200);
+    }
 }
 
 public sealed class UpdatePaymentSettingsValidator : AbstractValidator<UpdatePaymentSettingsCommand>
 {
     public UpdatePaymentSettingsValidator()
     {
-        RuleFor(c => c.PaynowIntegrationId).MaximumLength(100);
-        RuleFor(c => c.NewIntegrationKey).MaximumLength(200);
+        RuleFor(c => c.Usd).NotNull().SetValidator(new PaynowIntegrationInputValidator());
+        RuleFor(c => c.Zwg).NotNull().SetValidator(new PaynowIntegrationInputValidator());
         RuleFor(c => c.BankDetails).MaximumLength(BusinessSettings.MaxBankDetailsLength).WithMessage("Use at most 1000 characters.");
     }
 }
@@ -61,9 +86,17 @@ public sealed class UpdatePaymentSettingsHandler(
     IActivityLog activity,
     TimeProvider timeProvider) : IRequestHandler<UpdatePaymentSettingsCommand, Result>
 {
-    public static readonly Error KeyRequired = new("Settings.PaynowKeyRequired", "Enter the Paynow integration key.");
+    public static Error KeyRequired(CurrencyCode currency)
+    {
+        ArgumentNullException.ThrowIfNull(currency);
+        return new("Settings.PaynowKeyRequired", $"Enter the Paynow integration key for {currency.DisplayText}.");
+    }
 
-    public static readonly Error IdRequired = new("Settings.PaynowIdRequired", "Enter the Paynow integration ID.");
+    public static Error IdRequired(CurrencyCode currency)
+    {
+        ArgumentNullException.ThrowIfNull(currency);
+        return new("Settings.PaynowIdRequired", $"Enter the Paynow integration ID for {currency.DisplayText}.");
+    }
 
     public async Task<Result> Handle(UpdatePaymentSettingsCommand request, CancellationToken cancellationToken)
     {
@@ -75,56 +108,12 @@ public sealed class UpdatePaymentSettingsHandler(
         }
 
         var changes = new List<string>();
-        var hasId = !string.IsNullOrWhiteSpace(request.PaynowIntegrationId);
-        var hasKey = !string.IsNullOrWhiteSpace(request.NewIntegrationKey);
-        var gateway = await gateways.GetAsync(businessId, PaymentProvider.Paynow, cancellationToken);
-
-        if (gateway is null && (hasId || hasKey))
+        foreach (var (currency, input) in new[] { (CurrencyCode.Usd, request.Usd), (CurrencyCode.Zwg, request.Zwg) })
         {
-            if (!hasId)
+            var saved = await SaveIntegrationAsync(businessId, currency, input ?? PaynowIntegrationInput.Blank, now, changes, cancellationToken);
+            if (saved.IsFailure)
             {
-                return Result.Failure(IdRequired);
-            }
-
-            if (!hasKey)
-            {
-                return Result.Failure(KeyRequired);
-            }
-
-            var created = PaymentGatewayConfig.Create(
-                currentTenant.TenantId, businessId, PaymentProvider.Paynow,
-                request.PaynowIntegrationId, secrets.Protect(request.NewIntegrationKey!.Trim()), request.IsLive, now);
-            if (created.IsFailure)
-            {
-                return Result.Failure(created.Error);
-            }
-
-            gateways.Add(created.Value);
-            changes.Add($"Paynow connected ({(request.IsLive ? "live" : "test")})");
-        }
-        else if (gateway is not null)
-        {
-            if (!hasId)
-            {
-                return Result.Failure(IdRequired);
-            }
-
-            var modeChanged = gateway.IsLive != request.IsLive;
-            var idChanged = gateway.IntegrationId != request.PaynowIntegrationId.Trim();
-            gateway.Update(request.PaynowIntegrationId, hasKey ? secrets.Protect(request.NewIntegrationKey!.Trim()) : null, request.IsLive, now);
-            if (hasKey)
-            {
-                changes.Add("Paynow key replaced");
-            }
-
-            if (idChanged)
-            {
-                changes.Add("Paynow integration ID changed");
-            }
-
-            if (modeChanged)
-            {
-                changes.Add($"Paynow switched to {(request.IsLive ? "live" : "test")}");
+                return saved;
             }
         }
 
@@ -146,10 +135,79 @@ public sealed class UpdatePaymentSettingsHandler(
         await activity.AddAsync(nameof(Business), businessId, "PaymentSettingsUpdated", summary, cancellationToken);
         return Result.Success();
     }
+
+    private async Task<Result> SaveIntegrationAsync(
+        Guid businessId,
+        CurrencyCode currency,
+        PaynowIntegrationInput input,
+        DateTimeOffset now,
+        List<string> changes,
+        CancellationToken cancellationToken)
+    {
+        var label = $"Paynow {currency.DisplayText}";
+        var hasId = !string.IsNullOrWhiteSpace(input.IntegrationId);
+        var hasKey = !string.IsNullOrWhiteSpace(input.NewIntegrationKey);
+        var gateway = await gateways.GetAsync(businessId, PaymentProvider.Paynow, currency, cancellationToken);
+
+        if (gateway is null)
+        {
+            if (!hasId && !hasKey)
+            {
+                return Result.Success();
+            }
+
+            if (!hasId)
+            {
+                return Result.Failure(IdRequired(currency));
+            }
+
+            if (!hasKey)
+            {
+                return Result.Failure(KeyRequired(currency));
+            }
+
+            var created = PaymentGatewayConfig.Create(
+                currentTenant.TenantId, businessId, PaymentProvider.Paynow,
+                input.IntegrationId, secrets.Protect(input.NewIntegrationKey!.Trim()), input.IsLive, now, currency);
+            if (created.IsFailure)
+            {
+                return Result.Failure(created.Error);
+            }
+
+            gateways.Add(created.Value);
+            changes.Add($"{label} connected ({(input.IsLive ? "live" : "test")})");
+            return Result.Success();
+        }
+
+        if (!hasId)
+        {
+            return Result.Failure(IdRequired(currency));
+        }
+
+        var modeChanged = gateway.IsLive != input.IsLive;
+        var idChanged = gateway.IntegrationId != input.IntegrationId.Trim();
+        gateway.Update(input.IntegrationId, hasKey ? secrets.Protect(input.NewIntegrationKey!.Trim()) : null, input.IsLive, now);
+        if (hasKey)
+        {
+            changes.Add($"{label} key replaced");
+        }
+
+        if (idChanged)
+        {
+            changes.Add($"{label} integration ID changed");
+        }
+
+        if (modeChanged)
+        {
+            changes.Add($"{label} switched to {(input.IsLive ? "live" : "test")}");
+        }
+
+        return Result.Success();
+    }
 }
 
-/// <summary>Checks the saved Paynow configuration can sign requests. Initiates nothing and calls no network.</summary>
-public sealed record TestPaynowConnectionCommand : IRequest<Result>;
+/// <summary>Checks one currency's saved Paynow integration can sign requests. Initiates nothing and calls no network.</summary>
+public sealed record TestPaynowConnectionCommand(CurrencyCode Currency) : IRequest<Result>;
 
 public sealed class TestPaynowConnectionHandler(
     ICurrentBusiness currentBusiness,
@@ -162,12 +220,13 @@ public sealed class TestPaynowConnectionHandler(
 
     public async Task<Result> Handle(TestPaynowConnectionCommand request, CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(request);
         if (currentBusiness.BusinessId is not { } businessId)
         {
             return Result.Failure(BusinessSettingsErrors.NoBusiness);
         }
 
-        var gateway = await gateways.GetAsync(businessId, PaymentProvider.Paynow, cancellationToken);
+        var gateway = await gateways.GetAsync(businessId, PaymentProvider.Paynow, request.Currency, cancellationToken);
         if (gateway is null || string.IsNullOrWhiteSpace(gateway.IntegrationId))
         {
             return Result.Failure(NotConfigured);

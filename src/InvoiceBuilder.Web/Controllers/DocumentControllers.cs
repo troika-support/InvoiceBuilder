@@ -223,7 +223,7 @@ public sealed class ClientLinkController(
             var receiptLinks = string.Concat((await documents.ListReceiptsAsync(document.Id, cancellationToken)).Where(r => r.Number is not null).Select(r => "<p><a href=\"/d/" + Uri.EscapeDataString(token) + "/receipts/" + r.Id + "\">Receipt " + System.Net.WebUtility.HtmlEncode(r.Number!.Value.ToString()) + "</a></p>"));
             panel = "<section class=\"ib-panel\"><p><strong>Paid in full</strong></p>" + receiptLinks + "</section>";
         }
-        else if (await gateways.GetForWebhookAsync(document.BusinessId, InvoiceBuilder.Domain.Payments.PaymentProvider.Paynow, cancellationToken) is null)
+        else if (await gateways.GetForWebhookAsync(document.BusinessId, InvoiceBuilder.Domain.Payments.PaymentProvider.Paynow, document.Currency, cancellationToken) is null)
         {
             return pageHtml;
         }

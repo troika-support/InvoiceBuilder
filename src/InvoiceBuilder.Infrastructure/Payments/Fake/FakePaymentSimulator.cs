@@ -44,7 +44,7 @@ public sealed partial class FakePaymentSimulator(
         var providerReference = $"FAKE-{payment.Reference}";
         state.Set(payment.PollUrl, new GatewayStatus(payment.Reference, providerReference, payment.Amount, gatewayState));
 
-        var webhook = new Uri(webhookRoot, $"/webhooks/paynow/{payment.BusinessId}");
+        var webhook = new Uri(webhookRoot, PaynowGateway.ResultPath(payment.BusinessId, payment.Currency));
         var form = Form(payment, providerReference, result);
 
         if (delay <= TimeSpan.Zero)
@@ -77,7 +77,7 @@ public sealed partial class FakePaymentSimulator(
 
     private async Task EnsureConfigAsync(Payment payment, CancellationToken ct)
     {
-        if (await configs.GetAsync(payment.BusinessId, PaymentProvider.Paynow, ct) is not null)
+        if (await configs.GetAsync(payment.BusinessId, PaymentProvider.Paynow, payment.Currency, ct) is not null)
         {
             return;
         }
@@ -89,7 +89,8 @@ public sealed partial class FakePaymentSimulator(
             "FAKE",
             secrets.Protect(FakePaymentGateway.IntegrationKey),
             false,
-            time.GetUtcNow());
+            time.GetUtcNow(),
+            payment.Currency);
         if (config.IsSuccess)
         {
             configs.Add(config.Value);

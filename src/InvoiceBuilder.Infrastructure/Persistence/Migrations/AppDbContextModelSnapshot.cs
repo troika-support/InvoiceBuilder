@@ -1224,6 +1224,13 @@ namespace InvoiceBuilder.Infrastructure.Persistence.Migrations
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("datetimeoffset");
 
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(3)
+                        .HasColumnType("nvarchar(3)")
+                        .HasDefaultValue("USD");
+
                     b.Property<string>("IntegrationId")
                         .IsRequired()
                         .HasMaxLength(100)
@@ -1256,7 +1263,7 @@ namespace InvoiceBuilder.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.HasIndex("BusinessId", "Provider")
+                    b.HasIndex("BusinessId", "Provider", "Currency")
                         .IsUnique();
 
                     b.ToTable("PaymentGatewayConfigs", (string)null);

@@ -22,16 +22,17 @@ public sealed class StartClientPaymentTests
 
     private StartClientPaymentHandler Handler() => new(_sender, _documents, _scope, _gateways, _payments, _clients);
 
-    private Document PlanInvoice(string token)
+    // Only a USD Paynow integration is saved, as for a business that hasn't set up ZiG.
+    private Document PlanInvoice(string token, CurrencyCode? currency = null)
     {
-        var invoice = Document.CreateDraft(Guid.NewGuid(), Guid.NewGuid(), DocumentType.Invoice, Guid.NewGuid(), CurrencyCode.Usd, Now);
+        var invoice = Document.CreateDraft(Guid.NewGuid(), Guid.NewGuid(), DocumentType.Invoice, Guid.NewGuid(), currency ?? CurrencyCode.Usd, Now);
         invoice.AddLine(new LineInput("Item", null, 1m, 100m, 0m, null), Now).IsSuccess.ShouldBeTrue();
         invoice.SetPlan([new InstalmentDraft(InstalmentDueKind.Date, new DateOnly(2026, 11, 1), 40m), new InstalmentDraft(InstalmentDueKind.Date, new DateOnly(2026, 12, 1), 60m)], InstalmentFrequency.Monthly, Now).IsSuccess.ShouldBeTrue();
         invoice.Issue(new IssueRequest(DocumentNumber.Create("INV-0001").Value, new DateOnly(2026, 10, 23), 14, "{}", "{}", Guid.NewGuid(), null, 14, ClientLinkToken.Hash(token)), Now).IsSuccess.ShouldBeTrue();
         _documents.GetByLinkTokenHashAsync(ClientLinkToken.Hash(token), Arg.Any<CancellationToken>()).Returns(invoice);
         _documents.ListCreditNotesAsync(invoice.Id, Arg.Any<CancellationToken>()).Returns([]);
         _payments.ConfirmedAllocatedTotalAsync(invoice.Id, Arg.Any<CancellationToken>()).Returns(0m);
-        _gateways.GetForWebhookAsync(invoice.BusinessId, PaymentProvider.Paynow, Arg.Any<CancellationToken>()).Returns(PaymentGatewayConfig.Create(invoice.TenantId, invoice.BusinessId, PaymentProvider.Paynow, "1", "key", false, Now).Value);
+        _gateways.GetForWebhookAsync(invoice.BusinessId, PaymentProvider.Paynow, CurrencyCode.Usd, Arg.Any<CancellationToken>()).Returns(PaymentGatewayConfig.Create(invoice.TenantId, invoice.BusinessId, PaymentProvider.Paynow, "1", "key", false, Now).Value);
         _sender.Send(Arg.Any<StartOnlinePaymentCommand>(), Arg.Any<CancellationToken>()).Returns(Result.Success(new StartedPayment(Guid.NewGuid(), "ref", null, null)));
         return invoice;
     }
@@ -43,6 +44,18 @@ public sealed class StartClientPaymentTests
         var result = await Handler().Handle(new StartClientPaymentCommand("tok", null, PaymentMethod.Card, null, "a@b.co", NextInstalment: true), CancellationToken.None);
         result.IsSuccess.ShouldBeTrue();
         await _sender.Received(1).Send(Arg.Is<StartOnlinePaymentCommand>(c => c.DocumentId == invoice.Id && c.Amount == 40m && c.ClientToken == "tok"), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Zig_invoice_cannot_be_paid_online_when_only_the_usd_integration_is_set_up()
+    {
+        PlanInvoice("tok-zig", CurrencyCode.Zwg);
+
+        var result = await Handler().Handle(new StartClientPaymentCommand("tok-zig", null, PaymentMethod.EcoCash, "0771234567", null), CancellationToken.None);
+
+        result.IsFailure.ShouldBeTrue();
+        result.Error.Code.ShouldBe("Payment.NotAvailable");
+        await _sender.DidNotReceive().Send(Arg.Any<StartOnlinePaymentCommand>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]

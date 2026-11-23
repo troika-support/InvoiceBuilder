@@ -1,5 +1,6 @@
 using InvoiceBuilder.Application.Abstractions;
 using InvoiceBuilder.Domain.Payments;
+using InvoiceBuilder.Domain.ValueObjects;
 using Microsoft.EntityFrameworkCore;
 
 namespace InvoiceBuilder.Infrastructure.Persistence;
@@ -8,20 +9,20 @@ public sealed class PaymentGatewayConfigRepository(AppDbContext db) : IPaymentGa
 {
     public void Add(PaymentGatewayConfig config) => db.PaymentGatewayConfigs.Add(config);
 
-    public Task<PaymentGatewayConfig?> GetAsync(Guid businessId, PaymentProvider provider, CancellationToken cancellationToken = default) =>
-        db.PaymentGatewayConfigs.FirstOrDefaultAsync(c => c.BusinessId == businessId && c.Provider == provider, cancellationToken);
+    public Task<PaymentGatewayConfig?> GetAsync(Guid businessId, PaymentProvider provider, CurrencyCode currency, CancellationToken cancellationToken = default) =>
+        db.PaymentGatewayConfigs.FirstOrDefaultAsync(c => c.BusinessId == businessId && c.Provider == provider && c.Currency == currency, cancellationToken);
 
-    public PaymentGatewayConfig? Find(Guid businessId, PaymentProvider provider)
+    public PaymentGatewayConfig? Find(Guid businessId, PaymentProvider provider, CurrencyCode currency)
     {
-        return db.PaymentGatewayConfigs.FirstOrDefault(c => c.BusinessId == businessId && c.Provider == provider);
+        return db.PaymentGatewayConfigs.FirstOrDefault(c => c.BusinessId == businessId && c.Provider == provider && c.Currency == currency);
     }
 
     // Reviewed admin query: the webhook has no tenant yet, so query filters are skipped for this one lookup.
-    public Task<PaymentGatewayConfig?> GetForWebhookAsync(Guid businessId, PaymentProvider provider, CancellationToken cancellationToken = default)
+    public Task<PaymentGatewayConfig?> GetForWebhookAsync(Guid businessId, PaymentProvider provider, CurrencyCode currency, CancellationToken cancellationToken = default)
     {
         return db.PaymentGatewayConfigs
             .IgnoreQueryFilters()
-            .FirstOrDefaultAsync(c => c.BusinessId == businessId && c.Provider == provider, cancellationToken);
+            .FirstOrDefaultAsync(c => c.BusinessId == businessId && c.Provider == provider && c.Currency == currency, cancellationToken);
     }
 }
 

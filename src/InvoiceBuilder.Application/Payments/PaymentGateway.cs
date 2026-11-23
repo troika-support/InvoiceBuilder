@@ -1,4 +1,5 @@
 using InvoiceBuilder.Domain.Common;
+using InvoiceBuilder.Domain.ValueObjects;
 
 namespace InvoiceBuilder.Application.Payments;
 
@@ -8,9 +9,9 @@ public interface IPaymentGateway
 
     Task<Result<PaymentInitiation>> InitiateMobileAsync(PaymentRequest request, string phone, MobileMethod method, CancellationToken ct);
 
-    Task<Result<GatewayStatus>> CheckStatusAsync(Guid businessId, string pollUrl, CancellationToken ct);
+    Task<Result<GatewayStatus>> CheckStatusAsync(Guid businessId, CurrencyCode currency, string pollUrl, CancellationToken ct);
 
-    bool VerifyCallback(Guid businessId, IReadOnlyDictionary<string, string> fields);
+    bool VerifyCallback(Guid businessId, CurrencyCode currency, IReadOnlyDictionary<string, string> fields);
 }
 
 /// <param name="PayerEmail">The client's email, or empty when unknown.</param>

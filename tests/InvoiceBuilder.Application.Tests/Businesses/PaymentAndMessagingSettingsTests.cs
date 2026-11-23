@@ -3,6 +3,7 @@ using InvoiceBuilder.Application.Businesses.Settings;
 using InvoiceBuilder.Application.Payments;
 using InvoiceBuilder.Domain.Businesses;
 using InvoiceBuilder.Domain.Payments;
+using InvoiceBuilder.Domain.ValueObjects;
 using NSubstitute;
 
 namespace InvoiceBuilder.Application.Tests.Businesses;
@@ -26,6 +27,8 @@ public sealed class PaymentAndMessagingSettingsTests
         _secrets.Protect(Arg.Any<string>()).Returns(c => "enc:" + c.Arg<string>());
     }
 
+    private static PaynowIntegrationInput Usd(string id, string? key, bool live) => new(id, key, live);
+
     private UpdatePaymentSettingsHandler PaymentHandler() =>
         new(_tenant, _business, _gateways, _settings, _secrets, _activity, TimeProvider.System);
 
@@ -37,7 +40,7 @@ public sealed class PaymentAndMessagingSettingsTests
         string? summary = null;
         await _activity.AddAsync(Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(), Arg.Do<string>(s => summary = s), Arg.Any<CancellationToken>());
 
-        var result = await PaymentHandler().Handle(new UpdatePaymentSettingsCommand("12345", "super-secret-key", false, "FNB 123"), CancellationToken.None);
+        var result = await PaymentHandler().Handle(new UpdatePaymentSettingsCommand(Usd("12345", "super-secret-key", false), PaynowIntegrationInput.Blank, "FNB 123"), CancellationToken.None);
 
         result.IsSuccess.ShouldBeTrue();
         added.ShouldNotBeNull();
@@ -47,12 +50,66 @@ public sealed class PaymentAndMessagingSettingsTests
     }
 
     [Fact]
+    public async Task Usd_and_zig_are_saved_as_separate_integrations_with_their_own_keys()
+    {
+        var added = new List<PaymentGatewayConfig>();
+        _gateways.Add(Arg.Do<PaymentGatewayConfig>(added.Add));
+        string? summary = null;
+        await _activity.AddAsync(Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(), Arg.Do<string>(s => summary = s), Arg.Any<CancellationToken>());
+
+        var result = await PaymentHandler().Handle(
+            new UpdatePaymentSettingsCommand(Usd("111", "usd-key", true), new PaynowIntegrationInput("222", "zig-key", false), string.Empty),
+            CancellationToken.None);
+
+        result.IsSuccess.ShouldBeTrue();
+        added.Count.ShouldBe(2);
+        added.Single(c => c.Currency == CurrencyCode.Usd).IntegrationKeyEncrypted.ShouldBe("enc:usd-key");
+        var zig = added.Single(c => c.Currency == CurrencyCode.Zwg);
+        zig.IntegrationId.ShouldBe("222");
+        zig.IntegrationKeyEncrypted.ShouldBe("enc:zig-key");
+        zig.IsLive.ShouldBeFalse();
+        summary.ShouldNotBeNull();
+        summary.ShouldContain("Paynow ZiG connected (test)");
+        summary.ShouldNotContain("zig-key");
+    }
+
+    [Fact]
+    public async Task Zig_id_without_a_key_names_the_currency()
+    {
+        var result = await PaymentHandler().Handle(
+            new UpdatePaymentSettingsCommand(PaynowIntegrationInput.Blank, new PaynowIntegrationInput("222", null, false), string.Empty),
+            CancellationToken.None);
+
+        result.Error.ShouldBe(UpdatePaymentSettingsHandler.KeyRequired(CurrencyCode.Zwg));
+        result.Error.Message.ShouldContain("ZiG");
+        _gateways.DidNotReceiveWithAnyArgs().Add(default!);
+    }
+
+    [Fact]
+    public void Validator_reports_errors_under_the_currency_prefix()
+    {
+        var result = new UpdatePaymentSettingsValidator().Validate(
+            new UpdatePaymentSettingsCommand(PaynowIntegrationInput.Blank, new PaynowIntegrationInput(new string('1', 101), null, false), string.Empty));
+
+        result.Errors.ShouldContain(e => e.PropertyName == "Zwg.IntegrationId");
+    }
+
+    [Fact]
+    public void Command_text_never_contains_a_key()
+    {
+        var command = new UpdatePaymentSettingsCommand(Usd("1", "secret-usd", false), new PaynowIntegrationInput("2", "secret-zig", false), string.Empty);
+
+        command.ToString().ShouldNotContain("secret");
+        command.Usd.ToString().ShouldNotContain("secret");
+    }
+
+    [Fact]
     public async Task Blank_key_keeps_the_saved_key()
     {
         var existing = PaymentGatewayConfig.Create(TenantId, BusinessId, PaymentProvider.Paynow, "1", "enc:old", false, DateTimeOffset.UtcNow).Value;
-        _gateways.GetAsync(BusinessId, PaymentProvider.Paynow, Arg.Any<CancellationToken>()).Returns(existing);
+        _gateways.GetAsync(BusinessId, PaymentProvider.Paynow, CurrencyCode.Usd, Arg.Any<CancellationToken>()).Returns(existing);
 
-        var result = await PaymentHandler().Handle(new UpdatePaymentSettingsCommand("2", null, true, string.Empty), CancellationToken.None);
+        var result = await PaymentHandler().Handle(new UpdatePaymentSettingsCommand(Usd("2", null, true), PaynowIntegrationInput.Blank, string.Empty), CancellationToken.None);
 
         result.IsSuccess.ShouldBeTrue();
         existing.IntegrationKeyEncrypted.ShouldBe("enc:old");
@@ -63,20 +120,21 @@ public sealed class PaymentAndMessagingSettingsTests
     [Fact]
     public async Task Paynow_id_without_a_key_is_rejected_on_first_save()
     {
-        var result = await PaymentHandler().Handle(new UpdatePaymentSettingsCommand("12345", null, false, string.Empty), CancellationToken.None);
+        var result = await PaymentHandler().Handle(new UpdatePaymentSettingsCommand(Usd("12345", null, false), PaynowIntegrationInput.Blank, string.Empty), CancellationToken.None);
 
-        result.Error.ShouldBe(UpdatePaymentSettingsHandler.KeyRequired);
+        result.Error.ShouldBe(UpdatePaymentSettingsHandler.KeyRequired(CurrencyCode.Usd));
     }
 
     [Fact]
     public async Task Query_reports_a_saved_key_without_returning_it()
     {
         var existing = PaymentGatewayConfig.Create(TenantId, BusinessId, PaymentProvider.Paynow, "1", "enc:old", true, DateTimeOffset.UtcNow).Value;
-        _gateways.GetAsync(BusinessId, PaymentProvider.Paynow, Arg.Any<CancellationToken>()).Returns(existing);
+        _gateways.GetAsync(BusinessId, PaymentProvider.Paynow, CurrencyCode.Usd, Arg.Any<CancellationToken>()).Returns(existing);
 
         var result = await new GetPaymentSettingsHandler(_business, _gateways, _settings).Handle(new GetPaymentSettingsQuery(), CancellationToken.None);
 
-        result.Value.PaynowKeySaved.ShouldBeTrue();
+        result.Value.Usd.KeySaved.ShouldBeTrue();
+        result.Value.Zwg.ShouldBe(PaynowIntegrationSettings.None);
         result.Value.ToString().ShouldNotContain("enc:old");
     }
 
@@ -84,13 +142,14 @@ public sealed class PaymentAndMessagingSettingsTests
     public async Task Test_connection_fails_when_not_configured_and_passes_when_key_decrypts()
     {
         var handler = new TestPaynowConnectionHandler(_business, _gateways, _secrets);
-        (await handler.Handle(new TestPaynowConnectionCommand(), CancellationToken.None)).Error.ShouldBe(TestPaynowConnectionHandler.NotConfigured);
+        (await handler.Handle(new TestPaynowConnectionCommand(CurrencyCode.Usd), CancellationToken.None)).Error.ShouldBe(TestPaynowConnectionHandler.NotConfigured);
 
         var existing = PaymentGatewayConfig.Create(TenantId, BusinessId, PaymentProvider.Paynow, "1", "enc:old", false, DateTimeOffset.UtcNow).Value;
-        _gateways.GetAsync(BusinessId, PaymentProvider.Paynow, Arg.Any<CancellationToken>()).Returns(existing);
+        _gateways.GetAsync(BusinessId, PaymentProvider.Paynow, CurrencyCode.Usd, Arg.Any<CancellationToken>()).Returns(existing);
         _secrets.Unprotect("enc:old").Returns("old");
 
-        (await handler.Handle(new TestPaynowConnectionCommand(), CancellationToken.None)).IsSuccess.ShouldBeTrue();
+        (await handler.Handle(new TestPaynowConnectionCommand(CurrencyCode.Usd), CancellationToken.None)).IsSuccess.ShouldBeTrue();
+        (await handler.Handle(new TestPaynowConnectionCommand(CurrencyCode.Zwg), CancellationToken.None)).Error.ShouldBe(TestPaynowConnectionHandler.NotConfigured);
     }
 
     [Fact]

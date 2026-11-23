@@ -4,6 +4,7 @@ using InvoiceBuilder.Domain.Clients;
 using InvoiceBuilder.Domain.Documents;
 using InvoiceBuilder.Domain.Payments;
 using InvoiceBuilder.Domain.Templates;
+using InvoiceBuilder.Domain.ValueObjects;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
@@ -97,7 +98,8 @@ public sealed class PaymentGatewayConfigConfiguration : IEntityTypeConfiguration
         builder.ToTable("PaymentGatewayConfigs");
         builder.Property(c => c.IntegrationId).HasMaxLength(100);
         builder.Property(c => c.IntegrationKeyEncrypted).HasMaxLength(2000);
-        builder.HasIndex(c => new { c.BusinessId, c.Provider }).IsUnique();
+        builder.Property(c => c.Currency).HasDefaultValue(CurrencyCode.Usd);
+        builder.HasIndex(c => new { c.BusinessId, c.Provider, c.Currency }).IsUnique();
     }
 }
 

@@ -1,6 +1,7 @@
 @page "/settings/payments"
 @attribute [Microsoft.AspNetCore.Authorization.Authorize(Policy = "Owner")]
 @using InvoiceBuilder.Application.Businesses.Settings
+@using InvoiceBuilder.Domain.ValueObjects
 @inject MediatR.ISender Sender
 @inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
 
@@ -27,26 +28,36 @@
                 <MudAlert Severity="Severity.Error" role="alert" Class="mb-4">@_formError</MudAlert>
             }
 
-            <div class="ib-card" style="padding: 20px;">
-                <h3 class="ib-card__title">Paynow</h3>
-                <div class="ib-form-grid">
-                    <MudTextField @bind-Value="_model.IntegrationId" Label="Integration ID" Variant="Variant.Outlined" Error="@HasError("PaynowIntegrationId")" ErrorText="@ErrorFor("PaynowIntegrationId")" />
-                    <MudTextField @bind-Value="_model.NewKey" Label="Integration key" InputType="InputType.Password"
-                                  Variant="Variant.Outlined" UserAttributes="@(new Dictionary<string, object?> { ["autocomplete"] = "new-password" })"
-                                  Placeholder="@(_model.KeySaved ? "Saved ••••" : null)"
-                                  HelperText="@(_model.KeySaved ? "Saved ••••. Leave blank to keep it, or type a new key to replace it." : "Paste the key from your Paynow account.")"
-                                  Error="@HasError("NewIntegrationKey")" ErrorText="@ErrorFor("NewIntegrationKey")" />
+            <p class="ib-help" style="margin-top:0;">
+                Paynow gives you a separate integration ID and key for each currency. Set up the currencies you bill in.
+                Invoices in a currency with no integration show your bank details instead of a pay button.
+            </p>
+
+            @foreach (var integration in _model.Integrations)
+            {
+                var prefix = integration.FieldPrefix;
+                <div class="ib-card" style="padding: 20px; margin-bottom: 16px;" @key="prefix">
+                    <h3 class="ib-card__title">Paynow · @integration.Currency.DisplayText</h3>
+                    <div class="ib-form-grid">
+                        <MudTextField @bind-Value="integration.IntegrationId" Label="@($"{integration.Currency.DisplayText} integration ID")" Variant="Variant.Outlined"
+                                      Error="@HasError(prefix + ".IntegrationId")" ErrorText="@ErrorFor(prefix + ".IntegrationId")" />
+                        <MudTextField @bind-Value="integration.NewKey" Label="@($"{integration.Currency.DisplayText} integration key")" InputType="InputType.Password"
+                                      Variant="Variant.Outlined" UserAttributes="@(new Dictionary<string, object?> { ["autocomplete"] = "new-password" })"
+                                      Placeholder="@(integration.KeySaved ? "Saved ••••" : null)"
+                                      HelperText="@(integration.KeySaved ? "Saved ••••. Leave blank to keep it, or type a new key to replace it." : $"Paste the key of your {integration.Currency.DisplayText} integration from your Paynow account.")"
+                                      Error="@HasError(prefix + ".NewIntegrationKey")" ErrorText="@ErrorFor(prefix + ".NewIntegrationKey")" />
+                    </div>
+                    <MudSwitch T="bool" @bind-Value="integration.IsLive" Color="Color.Primary" Label="@(integration.IsLive ? "Live: real payments" : "Test mode: no real money moves")" />
+                    <div style="display:flex; gap:12px; align-items:center; margin-top:8px;">
+                        <MudButton Variant="Variant.Outlined" Color="Color.Primary" OnClick="@(() => TestAsync(integration))" Disabled="@(integration.Testing || !integration.KeySaved)">Test connection</MudButton>
+                        @if (integration.TestMessage is not null)
+                        {
+                            <span role="status" class="@(integration.TestOk ? "ib-help" : "ib-field-error")">@integration.TestMessage</span>
+                        }
+                    </div>
                 </div>
-                <MudSwitch T="bool" @bind-Value="_model.IsLive" Color="Color.Primary" Label="@(_model.IsLive ? "Live: real payments" : "Test mode: no real money moves")" />
-                <div style="display:flex; gap:12px; align-items:center; margin-top:8px;">
-                    <MudButton Variant="Variant.Outlined" Color="Color.Primary" OnClick="TestAsync" Disabled="@(_testing || !_model.KeySaved)">Test connection</MudButton>
-                    @if (_testMessage is not null)
-                    {
-                        <span role="status" class="@(_testOk ? "ib-help" : "ib-field-error")">@_testMessage</span>
-                    }
-                </div>
-                <p class="ib-help">Test connection checks the saved key can sign requests. It starts no payment and sends nothing to Paynow.</p>
-            </div>
+            }
+            <p class="ib-help">Test connection checks the saved key can sign requests. It starts no payment and sends nothing to Paynow.</p>
 
             <div class="ib-card" style="padding: 20px; margin-top: 16px;">
                 <h3 class="ib-card__title">Bank transfer details</h3>
@@ -67,9 +78,6 @@
     private Model? _model;
     private string? _loadError;
     private string? _formError;
-    private string? _testMessage;
-    private bool _testOk;
-    private bool _testing;
     private bool _saving;
     private IReadOnlyDictionary<string, string[]> _fieldErrors = new Dictionary<string, string[]>();
 
@@ -88,9 +96,11 @@
         _loadError = null;
         _model = new Model
         {
-            IntegrationId = result.Value.PaynowIntegrationId,
-            KeySaved = result.Value.PaynowKeySaved,
-            IsLive = result.Value.IsLive,
+            Integrations =
+            [
+                IntegrationModel.From(CurrencyCode.Usd, "Usd", result.Value.Usd),
+                IntegrationModel.From(CurrencyCode.Zwg, "Zwg", result.Value.Zwg),
+            ],
             BankDetails = result.Value.BankDetails,
         };
     }
@@ -104,11 +114,19 @@
 
         _saving = true;
         _formError = null;
-        _testMessage = null;
         _fieldErrors = new Dictionary<string, string[]>();
+        foreach (var integration in _model.Integrations)
+        {
+            integration.TestMessage = null;
+        }
+
         try
         {
-            var result = await Sender.Send(new UpdatePaymentSettingsCommand(_model.IntegrationId ?? string.Empty, _model.NewKey, _model.IsLive, _model.BankDetails ?? string.Empty));
+            var command = new UpdatePaymentSettingsCommand(
+                _model.Integrations[0].ToInput(),
+                _model.Integrations[1].ToInput(),
+                _model.BankDetails ?? string.Empty);
+            var result = await Sender.Send(command);
             if (result.IsFailure)
             {
                 _fieldErrors = result.Error.FieldErrors ?? new Dictionary<string, string[]>();
@@ -126,26 +144,27 @@
         }
     }
 
-    private async Task TestAsync()
+    private async Task TestAsync(IntegrationModel integration)
     {
-        _testing = true;
+        integration.Testing = true;
         try
         {
-            var result = await Sender.Send(new TestPaynowConnectionCommand());
-            _testOk = result.IsSuccess;
-            _testMessage = result.IsSuccess ? "Connection settings look good." : result.Error.Message;
-            Announcer.Announce(_testMessage);
+            var result = await Sender.Send(new TestPaynowConnectionCommand(integration.Currency));
+            integration.TestOk = result.IsSuccess;
+            integration.TestMessage = result.IsSuccess
+                ? $"{integration.Currency.DisplayText} connection settings look good."
+                : result.Error.Message;
+            Announcer.Announce(integration.TestMessage);
         }
         finally
         {
-            _testing = false;
+            integration.Testing = false;
         }
     }
 
     private async Task DiscardAsync()
     {
         _formError = null;
-        _testMessage = null;
         _fieldErrors = new Dictionary<string, string[]>();
         await LoadAsync();
         Announcer.Announce("Changes discarded");
@@ -157,10 +176,31 @@
 
     private sealed class Model
     {
+        public required IReadOnlyList<IntegrationModel> Integrations { get; init; }
+        public string? BankDetails { get; set; }
+    }
+
+    private sealed class IntegrationModel
+    {
+        public required CurrencyCode Currency { get; init; }
+        public required string FieldPrefix { get; init; }
         public string? IntegrationId { get; set; }
         public string? NewKey { get; set; }
         public bool KeySaved { get; init; }
         public bool IsLive { get; set; }
-        public string? BankDetails { get; set; }
+        public bool Testing { get; set; }
+        public bool TestOk { get; set; }
+        public string? TestMessage { get; set; }
+
+        public static IntegrationModel From(CurrencyCode currency, string fieldPrefix, PaynowIntegrationSettings saved) => new()
+        {
+            Currency = currency,
+            FieldPrefix = fieldPrefix,
+            IntegrationId = saved.IntegrationId,
+            KeySaved = saved.KeySaved,
+            IsLive = saved.IsLive,
+        };
+
+        public PaynowIntegrationInput ToInput() => new(IntegrationId ?? string.Empty, NewKey, IsLive);
     }
 }

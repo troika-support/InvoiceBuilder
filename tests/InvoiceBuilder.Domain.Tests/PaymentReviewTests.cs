@@ -39,5 +39,7 @@ public sealed class PaymentReviewTests
         PaymentGatewayConfig.Create(Guid.NewGuid(), Guid.NewGuid(), PaymentProvider.Paynow, " ", "k", false, Now).IsFailure.ShouldBeTrue();
         PaymentGatewayConfig.Create(Guid.NewGuid(), Guid.NewGuid(), PaymentProvider.Paynow, "id", " ", false, Now).IsFailure.ShouldBeTrue();
         PaymentGatewayConfig.Create(Guid.NewGuid(), Guid.NewGuid(), PaymentProvider.Paynow, "id", "k", false, Now).IsSuccess.ShouldBeTrue();
+        PaymentGatewayConfig.Create(Guid.NewGuid(), Guid.NewGuid(), PaymentProvider.Paynow, "id", "k", false, Now).Value.Currency.ShouldBe(CurrencyCode.Usd);
+        PaymentGatewayConfig.Create(Guid.NewGuid(), Guid.NewGuid(), PaymentProvider.Paynow, "id", "k", false, Now, CurrencyCode.Zwg).Value.Currency.ShouldBe(CurrencyCode.Zwg);
     }
 }
