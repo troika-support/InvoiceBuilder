@@ -1,0 +1,497 @@
+@page "/"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize(Policy = "Staff")]
+@using InvoiceBuilder.Application.Clients
+@using InvoiceBuilder.Application.Dashboard
+@using InvoiceBuilder.Application.Documents
+@using InvoiceBuilder.Application.Messaging
+@using InvoiceBuilder.Application.Notifications
+@using InvoiceBuilder.Domain.Documents
+@using InvoiceBuilder.Domain.Notifications
+@using InvoiceBuilder.Web.Components.Pages.Documents
+@using InvoiceBuilder.Web.Components.Pages.Payments
+@inject MediatR.ISender Sender
+@inject IDisplayFormatter Format
+@inject InvoiceBuilder.Web.Services.ShellState Shell
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+@inject NavigationManager Nav
+@inject IDialogService Dialogs
+@inject TimeProvider Clock
+@inject Microsoft.Extensions.Options.IOptions<InvoiceBuilder.Application.Options.AppOptions> App
+
+<PageTitle>Dashboard · Invoice Builder</PageTitle>
+
+@* Region 1: header (design-system §8.1). *@
+<header class="ib-dash-header">
+    <div class="ib-dash-header__text">
+        <h1 class="ib-page-title">@Greeting</h1>
+        <p class="ib-dash-header__sub">Here's where @(Shell.Current?.Name ?? "your business") stands this month.</p>
+    </div>
+    <div class="ib-dash-header__tools">
+        <MudAutocomplete T="SearchHit" Label="Search documents, clients…" SearchFunc="SearchAsync" ToStringFunc="@(h => h?.Text)"
+                         ValueChanged="OpenHit" Variant="Variant.Outlined" Margin="Margin.Dense" ResetValueOnEmptyText="true" Clearable="true"
+                         Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" DebounceInterval="250" MinCharacters="2"
+                         Class="ib-dash-search" />
+        <div class="ib-segmented" role="group" aria-label="Currency">
+            <button type="button" class="ib-segmented__option ib-motion" aria-pressed="@(_currency == "USD" ? "true" : "false")" @onclick="@(() => SetCurrencyAsync("USD"))">USD</button>
+            <button type="button" class="ib-segmented__option ib-motion" aria-pressed="@(_currency == "ZWG" ? "true" : "false")" @onclick="@(() => SetCurrencyAsync("ZWG"))">ZiG</button>
+        </div>
+        <MudMenu Label="New document" Variant="Variant.Filled" Color="Color.Primary" EndIcon="@Icons.Material.Filled.KeyboardArrowDown"
+                 AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Class="ib-motion ib-motion-press">
+            <MudMenuItem Href="/quotes/new">New quote</MudMenuItem>
+            <MudMenuItem Href="/invoices/new">New invoice</MudMenuItem>
+        </MudMenu>
+    </div>
+</header>
+
+@if (_error is not null)
+{
+    <EmptyState Title="@_error" Message="Add a business or pick one in the sidebar." />
+}
+else if (_view is null)
+{
+    <MudProgressLinear Indeterminate="true" aria-label="Loading the dashboard" />
+}
+else
+{
+    var f = _view.Figures;
+
+    @* Region 2: stat tiles. *@
+    <section class="ib-dash-tiles" aria-label="@($"This month in {CurrencyName}")">
+        <div class="ib-stat">
+            <p class="ib-stat__label">Outstanding</p>
+            <MoneyText Amount="f.Outstanding.Amount" Currency="@f.Currency" Size="L" />
+            <p class="ib-stat__caption">@Plural(f.Outstanding.Count, "open invoice")</p>
+        </div>
+        <div class="ib-stat">
+            <p class="ib-stat__label ib-stat__label--danger">Overdue</p>
+            <MoneyText Amount="f.Overdue.Amount" Currency="@f.Currency" Size="L" />
+            <p class="ib-stat__caption">
+                @if (f.Overdue.Count == 0)
+                {
+                    @("Nothing overdue")
+                }
+                else
+                {
+                    @($"{Plural(f.Overdue.Count, "invoice")} · oldest {Plural(f.Overdue.OldestDays ?? 0, "day")}")
+                }
+            </p>
+        </div>
+        <div class="ib-stat">
+            <p class="ib-stat__label">Collected this month</p>
+            <MoneyText Amount="f.Collected.ThisMonth" Currency="@f.Currency" Size="L" />
+            <p class="ib-stat__caption">
+                @if (f.Collected.ChangePercent is { } pct)
+                {
+                    <span class="@(pct >= 0 ? "ib-delta--up" : "ib-delta--down")">
+                        <span aria-hidden="true">@(pct >= 0 ? "▲" : "▼")</span>
+                        <span class="ib-visually-hidden">@(pct >= 0 ? "Up" : "Down")</span>
+                        @($"{Math.Abs(pct)}%")
+                    </span>
+                    @($" vs {f.Collected.PreviousMonthName}")
+                }
+                else
+                {
+                    @($"— vs {f.Collected.PreviousMonthName}")
+                }
+            </p>
+        </div>
+        <div class="ib-stat">
+            <p class="ib-stat__label">Quotes awaiting reply</p>
+            <span class="ib-money" style="font-size:26px; font-weight:600">@f.QuotesAwaiting.Count</span>
+            <p class="ib-stat__caption">@Format.Money(f.QuotesAwaiting.Amount, f.Currency) in the pipeline</p>
+        </div>
+    </section>
+
+    <div class="ib-dash-columns">
+        @* Region 3: recent documents. *@
+        <section class="ib-card ib-dash-card ib-dash-columns__main" aria-labelledby="recent-heading">
+            <h2 id="recent-heading" class="ib-card__title">Recent documents</h2>
+            <MudTabs ActivePanelIndex="_tab" ActivePanelIndexChanged="OnTabAsync" Elevation="0" Class="mb-2">
+                <MudTabPanel Text="All" />
+                <MudTabPanel Text="Quotes" />
+                <MudTabPanel Text="Invoices" />
+                <MudTabPanel Text="Overdue" />
+            </MudTabs>
+            @if (_recent is null)
+            {
+                <MudProgressLinear Indeterminate="true" aria-label="Loading recent documents" />
+            }
+            else if (_recent.Count == 0 && _tab == 0)
+            {
+                <EmptyState Title="No documents yet" ActionText="Create your first quote" ActionHref="/quotes/new" />
+            }
+            else if (_recent.Count == 0)
+            {
+                <p class="ib-help" role="status">@(_tab == 3 ? "Nothing is overdue." : "Nothing here yet.")</p>
+            }
+            else
+            {
+                <div class="ib-scroll-x">
+                    <table class="ib-table ib-dash-table">
+                        <caption class="ib-visually-hidden">@TabNames[_tab] documents, newest first</caption>
+                        <thead>
+                            <tr>
+                                <th scope="col">Number</th>
+                                <th scope="col">Client</th>
+                                <th scope="col">Due</th>
+                                <th scope="col" class="ib-num">Amount</th>
+                                <th scope="col">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var row in _recent)
+                            {
+                                <tr>
+                                    <td><a class="ib-mono" href="@DocumentHref(row)">@(row.Number ?? "Draft")</a></td>
+                                    <td>@row.ClientName</td>
+                                    <td>
+                                        @if (row.DaysLate is { } late)
+                                        {
+                                            <span class="ib-text-danger">@Format.DaysLate(late)</span>
+                                        }
+                                        else
+                                        {
+                                            @(row.DueOrValidUntil is { } d ? d.ToString("d MMM", System.Globalization.CultureInfo.InvariantCulture) : "—")
+                                        }
+                                    </td>
+                                    <td class="ib-num"><MoneyText Amount="row.Total" Currency="@row.Currency" /></td>
+                                    <td>
+                                        @if (row.DaysLate is not null)
+                                        {
+                                            <StatusPill Status="StatusKind.Overdue" />
+                                        }
+                                        else
+                                        {
+                                            <StatusPill Status="PillKind(row.Status)" Label="@PillLabel(row.Status)" />
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+                <p class="ib-dash-card__footer"><a href="@(_tab == 1 ? "/quotes" : "/invoices")">View all documents →</a></p>
+            }
+        </section>
+
+        @* Region 4: needs attention. *@
+        <section class="ib-card ib-dash-card ib-dash-columns__side" aria-labelledby="attention-heading">
+            <h2 id="attention-heading" class="ib-card__title">Needs attention</h2>
+            @if (f.Attention.Count == 0 && VisibleNotifications.Count == 0)
+            {
+                <p class="ib-help" role="status">You're all caught up.</p>
+            }
+            else
+            {
+                <ul class="ib-attention">
+                    @foreach (var item in f.Attention)
+                    {
+                        var current = item;
+                        <li class="ib-attention__item @(IsOverdue(item) ? "ib-attention__item--danger" : null)">
+                            <span class="ib-attention__text">@item.Text</span>
+                            <span class="ib-attention__actions">
+                                @switch (item.Kind)
+                                {
+                                    case AttentionKind.OverdueInvoice:
+                                    case AttentionKind.OverdueInstalment:
+                                        <MudButton Variant="Variant.Outlined" Size="Size.Small" OnClick="() => SendReminderAsync(current)" aria-label="@($"Send reminder for {item.DocumentNumber}")">Send reminder</MudButton>
+                                        <MudButton Variant="Variant.Text" Size="Size.Small" OnClick="() => OpenRecordPayment(current)" aria-label="@($"Record payment for {item.DocumentNumber}")">Record payment</MudButton>
+                                        break;
+                                    case AttentionKind.InstalmentsDueThisWeek:
+                                        <MudButton Variant="Variant.Text" Size="Size.Small" Href="/invoices">View</MudButton>
+                                        break;
+                                    case AttentionKind.AcceptedQuote:
+                                        <MudButton Variant="Variant.Outlined" Size="Size.Small" OnClick="() => ConvertAsync(current)" Disabled="_busy" aria-label="@($"Convert {item.DocumentNumber} to invoice")">Convert to invoice</MudButton>
+                                        break;
+                                    case AttentionKind.UpcomingRecurring:
+                                        @if (_isOwner)
+                                        {
+                                            <MudButton Variant="Variant.Text" Size="Size.Small" Href="/recurring">Review before sending</MudButton>
+                                        }
+                                        break;
+                                }
+                            </span>
+                        </li>
+                    }
+                    @foreach (var note in VisibleNotifications)
+                    {
+                        var id = note.Id;
+                        <li class="ib-attention__item">
+                            <span class="ib-attention__text"><strong>@note.Title</strong> @note.Message</span>
+                            <span class="ib-attention__actions">
+                                @if (note.LinkPath is not null)
+                                {
+                                    <MudButton Variant="Variant.Text" Size="Size.Small" Href="@note.LinkPath" aria-label="@($"Open: {note.Title}")">Open</MudButton>
+                                }
+                                <MudButton Variant="Variant.Text" Size="Size.Small" OnClick="() => DismissAsync(id)" aria-label="@($"Dismiss {note.Title}")">Dismiss</MudButton>
+                            </span>
+                        </li>
+                    }
+                </ul>
+            }
+        </section>
+    </div>
+
+    @* Region 5: collected chart. *@
+    <section class="ib-card ib-dash-card" aria-labelledby="chart-heading">
+        <h2 id="chart-heading" class="ib-card__title">Collected</h2>
+        @{
+            var max = Math.Max(f.CollectedByMonth.Max(b => b.Amount), 0.01m);
+        }
+        <div class="ib-chart" role="img" aria-label="@ChartLabel(f)">
+            @foreach (var bar in f.CollectedByMonth)
+            {
+                <div class="ib-chart__col" aria-hidden="true">
+                    <span class="ib-chart__value ib-money">@(bar.Amount == 0m ? "" : Format.Money(bar.Amount, f.Currency))</span>
+                    <span class="ib-chart__bar @(bar.IsCurrent ? "ib-chart__bar--current" : null)" style="height:@BarHeight(bar.Amount, max)"></span>
+                    <span class="ib-chart__label">@bar.Label</span>
+                </div>
+            }
+        </div>
+    </section>
+}
+
+<RecordPaymentDrawer Open="_paymentOpen" ClientId="_paymentClientId" OnClosed="OnPaymentClosedAsync" />
+
+@code {
+    private static readonly string[] TabNames = ["All", "Quotes", "Invoices", "Overdue"];
+
+    private string _currency = "USD";
+    private DashboardView? _view;
+    private IReadOnlyList<NotificationRow> _notifications = [];
+    private IReadOnlyList<DocumentListRow>? _recent;
+    private int _tab;
+    private string? _error;
+    private bool _isOwner;
+    private bool _busy;
+    private bool _paymentOpen;
+    private Guid? _paymentClientId;
+
+    [CascadingParameter] private Task<AuthenticationState>? AuthState { get; set; }
+
+    private sealed record SearchHit(string Text, string Href);
+
+    /// <summary>Quote acceptances are shown as "Convert to invoice" rows, so their notifications would only repeat them.</summary>
+    private IReadOnlyList<NotificationRow> VisibleNotifications =>
+        _notifications.Where(n => n.Kind != NotificationKind.QuoteAccepted || _view?.Figures.Attention.All(a => a.Kind != AttentionKind.AcceptedQuote || !n.Message.StartsWith(a.DocumentNumber ?? "\u0000", StringComparison.Ordinal)) == true).ToList();
+
+    private string Greeting
+    {
+        get
+        {
+            var zone = TimeZoneInfo.FindSystemTimeZoneById(App.Value.TimeZone);
+            var hour = TimeZoneInfo.ConvertTime(Clock.GetUtcNow(), zone).Hour;
+            var part = hour < 12 ? "morning" : hour < 17 ? "afternoon" : "evening";
+            return _view?.FirstName is { } name ? $"Good {part}, {name}" : $"Good {part}";
+        }
+    }
+
+    private string CurrencyName => _currency == "ZWG" ? "ZiG" : "USD";
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (AuthState is not null)
+        {
+            _isOwner = (await AuthState).User.IsInRole(InvoiceBuilder.Web.Security.Roles.Owner);
+        }
+
+        await Shell.LoadAsync();
+        await LoadAsync(refresh: false);
+        await LoadRecentAsync();
+    }
+
+    private async Task LoadAsync(bool refresh)
+    {
+        var result = await Sender.Send(new GetDashboardQuery(_currency, refresh));
+        if (result.IsFailure)
+        {
+            _error = result.Error.Message;
+            return;
+        }
+
+        _error = null;
+        _view = result.Value;
+        _notifications = await Sender.Send(new ListNeedsAttentionQuery());
+    }
+
+    private async Task LoadRecentAsync()
+    {
+        _recent = null;
+        DocumentType[] types = _tab switch
+        {
+            1 => [DocumentType.Quote],
+            2 or 3 => [DocumentType.Invoice],
+            _ => [DocumentType.Quote, DocumentType.Invoice],
+        };
+        var filter = new DocumentListFilter(types, [], _tab == 3, null, null, null, null, null);
+        var result = await Sender.Send(new GetDocumentsQuery(filter, 1, 6));
+        _recent = result.IsSuccess ? result.Value.Items : [];
+    }
+
+    private async Task SetCurrencyAsync(string currency)
+    {
+        if (_currency == currency)
+        {
+            return;
+        }
+
+        _currency = currency;
+        await LoadAsync(refresh: false);
+        Announcer.Announce($"Showing figures in {CurrencyName}.");
+    }
+
+    private async Task OnTabAsync(int index)
+    {
+        _tab = index;
+        await LoadRecentAsync();
+    }
+
+    private async Task<IEnumerable<SearchHit>> SearchAsync(string? term, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(term))
+        {
+            return [];
+        }
+
+        var filter = new DocumentListFilter([DocumentType.Quote, DocumentType.Invoice, DocumentType.Receipt, DocumentType.CreditNote], [], false, null, null, null, null, term);
+        var documents = await Sender.Send(new GetDocumentsQuery(filter, 1, 5), cancellationToken);
+        var clients = await Sender.Send(new GetClientsQuery(term, ClientFilter.All, 1, 5), cancellationToken);
+        var hits = new List<SearchHit>();
+        if (documents.IsSuccess)
+        {
+            hits.AddRange(documents.Value.Items.Select(d => new SearchHit($"{d.Number ?? "Draft"} · {d.ClientName}", DocumentHref(d))));
+        }
+
+        if (clients.IsSuccess)
+        {
+            hits.AddRange(clients.Value.Items.Select(c => new SearchHit($"Client · {c.Name}", $"/clients?selected={c.Id}")));
+        }
+
+        return hits;
+    }
+
+    private void OpenHit(SearchHit? hit)
+    {
+        if (hit is not null)
+        {
+            Nav.NavigateTo(hit.Href);
+        }
+    }
+
+    private async Task SendReminderAsync(AttentionItem item)
+    {
+        if (item.DocumentId is not { } id)
+        {
+            return;
+        }
+
+        var parameters = new DialogParameters<SendDialog>
+        {
+            { x => x.DocumentId, id },
+            { x => x.Number, item.DocumentNumber ?? string.Empty },
+            { x => x.Amount, item.Amount is { } a && item.Currency is { } c ? Format.Money(a, c) : string.Empty },
+            { x => x.ClientName, item.ClientName ?? string.Empty },
+            { x => x.ClientEmail, item.ClientEmail },
+            { x => x.ClientPhone, item.ClientPhone },
+            { x => x.Title, $"Send reminder for {item.DocumentNumber}" },
+            { x => x.EmailTemplate, item.Kind == AttentionKind.OverdueInstalment ? MessageTemplates.InstalmentReminderEmail : MessageTemplates.ReminderEmail },
+        };
+        var dialog = await Dialogs.ShowAsync<SendDialog>("Send reminder", parameters);
+        var result = await dialog.Result;
+        if (result is { Canceled: false })
+        {
+            Announcer.Toast($"Reminder for {item.DocumentNumber} is being sent.", Severity.Success);
+        }
+    }
+
+    private void OpenRecordPayment(AttentionItem item)
+    {
+        _paymentClientId = item.ClientId;
+        _paymentOpen = true;
+    }
+
+    private async Task OnPaymentClosedAsync(bool saved)
+    {
+        _paymentOpen = false;
+        _paymentClientId = null;
+        if (saved)
+        {
+            await LoadAsync(refresh: true);
+            await LoadRecentAsync();
+        }
+    }
+
+    private async Task ConvertAsync(AttentionItem item)
+    {
+        if (item.DocumentId is not { } id)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            var result = await Sender.Send(new ConvertQuoteToInvoiceCommand(id));
+            if (result.IsFailure)
+            {
+                Announcer.Toast(result.Error.Message, Severity.Error);
+                return;
+            }
+
+            Announcer.Toast($"{item.DocumentNumber} converted. Review the draft invoice, then issue it.", Severity.Success);
+            Nav.NavigateTo($"/invoices/{result.Value}");
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task DismissAsync(Guid id)
+    {
+        var result = await Sender.Send(new DismissNotificationCommand(id));
+        if (result.IsSuccess)
+        {
+            _notifications = await Sender.Send(new ListNeedsAttentionQuery());
+            Announcer.Announce("Dismissed.");
+        }
+    }
+
+    private static bool IsOverdue(AttentionItem item) => item.Kind is AttentionKind.OverdueInvoice or AttentionKind.OverdueInstalment;
+
+    private static string Plural(int count, string noun) => count == 1 ? $"1 {noun}" : $"{count} {noun}s";
+
+    private static string DocumentHref(DocumentListRow row) => row.Type switch
+    {
+        DocumentType.Quote => $"/quotes/{row.Id}",
+        DocumentType.Invoice => $"/invoices/{row.Id}",
+        _ => "/receipts",
+    };
+
+    private static string BarHeight(decimal amount, decimal max) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{Math.Max(2m, Math.Round(amount / max * 100m, 1))}%");
+
+    private string ChartLabel(DashboardFigures f) =>
+        $"Collected per month in {CurrencyName}: " + string.Join(", ", f.CollectedByMonth.Select(b => $"{b.Label} {Format.Money(b.Amount, f.Currency)}"));
+
+    private static StatusKind PillKind(DocumentStatus s) => s switch
+    {
+        DocumentStatus.Draft => StatusKind.Draft,
+        DocumentStatus.Issued or DocumentStatus.Sent => StatusKind.Sent,
+        DocumentStatus.Viewed => StatusKind.Viewed,
+        DocumentStatus.PartPaid => StatusKind.PartPaid,
+        DocumentStatus.Paid => StatusKind.Paid,
+        DocumentStatus.Accepted or DocumentStatus.Converted => StatusKind.Accepted,
+        DocumentStatus.Declined => StatusKind.Declined,
+        DocumentStatus.Expired => StatusKind.Expired,
+        DocumentStatus.Void => StatusKind.Void,
+        _ => StatusKind.Draft,
+    };
+
+    private static string? PillLabel(DocumentStatus s) => s switch
+    {
+        DocumentStatus.Issued => "Issued",
+        DocumentStatus.Converted => "Converted",
+        _ => null,
+    };
+}

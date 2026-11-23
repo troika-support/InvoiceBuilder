@@ -1,0 +1,91 @@
+@page "/recurring"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize(Policy = "Owner")]
+@using InvoiceBuilder.Application.Recurring
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Application.Abstractions.IDisplayFormatter Format
+@inject ISnackbar Snackbar
+
+<PageTitle>Recurring · Invoice Builder</PageTitle>
+
+<h1 class="ib-page-title">Recurring</h1>
+
+@if (_rows is null)
+{
+    <MudProgressLinear Indeterminate="true" aria-label="Loading schedules" />
+}
+else if (_rows.Count == 0)
+{
+    <EmptyState Title="No recurring invoices yet" Message="Open an issued invoice and choose Make recurring." />
+}
+else
+{
+    <section class="ib-card" aria-label="Recurring schedules" style="padding: 20px;">
+        <table class="ib-table">
+            <thead>
+                <tr>
+                    <th scope="col">Client</th>
+                    <th scope="col">Source invoice</th>
+                    <th scope="col">Repeats</th>
+                    <th scope="col">Next run</th>
+                    <th scope="col">Mode</th>
+                    <th scope="col">Status</th>
+                    <th scope="col"><span class="ib-visually-hidden">Actions</span></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in _rows)
+                {
+                    <tr>
+                        <td>@row.ClientName</td>
+                        href="/invoices/@row.SourceDocumentId"
+                        <td>@row.Cadence</td>
+                        <td>@Format.Date(new DateTimeOffset(row.NextRunDate.ToDateTime(TimeOnly.MinValue), TimeSpan.FromHours(2)))</td>
+                        <td>@(row.AutoIssue ? "Auto" : "Draft")</td>
+                        <td>@(row.Paused ? "Paused" : "Active")</td>
+                        <td>
+                            <MudButton Variant="Variant.Text" OnClick="() => Edit(row)">Edit</MudButton>
+                            <MudButton Variant="Variant.Text" OnClick="() => TogglePausedAsync(row)">@(row.Paused ? "Resume" : "Pause")</MudButton>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </section>
+}
+
+<RecurringDrawer Open="_drawerOpen" Existing="_editing" OnClosed="OnDrawerClosedAsync" />
+
+@code {
+    private IReadOnlyList<RecurringRow>? _rows;
+    private RecurringRow? _editing;
+    private bool _drawerOpen;
+
+    protected override async Task OnInitializedAsync() => _rows = await Sender.Send(new ListRecurringQuery());
+
+    private void Edit(RecurringRow row)
+    {
+        _editing = row;
+        _drawerOpen = true;
+    }
+
+    private async Task OnDrawerClosedAsync(bool saved)
+    {
+        _drawerOpen = false;
+        if (saved)
+        {
+            _rows = await Sender.Send(new ListRecurringQuery());
+        }
+    }
+
+    private async Task TogglePausedAsync(RecurringRow row)
+    {
+        var result = await Sender.Send(new SetRecurringPausedCommand(row.Id, !row.Paused));
+        if (result.IsFailure)
+        {
+            Snackbar.Add(result.Error.Message, Severity.Warning);
+            return;
+        }
+
+        _rows = await Sender.Send(new ListRecurringQuery());
+    }
+}

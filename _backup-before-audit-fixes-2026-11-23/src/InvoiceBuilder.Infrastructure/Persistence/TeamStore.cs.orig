@@ -1,0 +1,188 @@
+using InvoiceBuilder.Application.Businesses.Settings;
+using InvoiceBuilder.Domain.Businesses;
+using InvoiceBuilder.Domain.Common;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
+
+namespace InvoiceBuilder.Infrastructure.Persistence;
+
+public sealed class TeamStore(AppDbContext db, UserManager<AppUser> users, RoleManager<IdentityRole> roles) : ITeamStore
+{
+    private const string OwnerRole = "Owner";
+    private const string StaffRole = "Staff";
+
+    public async Task<IReadOnlyList<TeamMember>> ListAsync(Guid tenantId, Guid businessId, DateTimeOffset now, CancellationToken cancellationToken = default)
+    {
+        var rows = await db.Users.Where(u => u.TenantId == tenantId)
+            .OrderBy(u => u.DisplayName)
+            .Select(u => new { u.Id, u.DisplayName, u.Email, u.LockoutEnd })
+            .ToListAsync(cancellationToken);
+        var ownerIds = (await OwnerIdsAsync(cancellationToken)).ToHashSet();
+        var assigned = (await db.UserBusinesses.Where(x => x.BusinessId == businessId).Select(x => x.UserId).ToListAsync(cancellationToken)).ToHashSet();
+
+        return rows
+            .Select(u => new TeamMember(u.Id, u.DisplayName, u.Email ?? string.Empty, ownerIds.Contains(u.Id), assigned.Contains(u.Id), u.LockoutEnd is null || u.LockoutEnd <= now))
+            .ToList();
+    }
+
+    public async Task<string?> SetStaffAccessAsync(Guid tenantId, Guid businessId, string userId, bool grant, DateTimeOffset now, CancellationToken cancellationToken = default)
+    {
+        var user = await FindStaffAsync(tenantId, userId, cancellationToken);
+        if (user is null)
+        {
+            return null;
+        }
+
+        var existing = await db.UserBusinesses.FirstOrDefaultAsync(x => x.UserId == userId && x.BusinessId == businessId, cancellationToken);
+        if (grant && existing is null)
+        {
+            db.UserBusinesses.Add(UserBusiness.Create(tenantId, userId, businessId, UserBusinessRole.Staff, now));
+        }
+        else if (!grant && existing is not null)
+        {
+            db.UserBusinesses.Remove(existing);
+        }
+
+        return NameOf(user);
+    }
+
+    public async Task<Result<string>> AddStaffAsync(Guid tenantId, string name, string email, string password, Guid businessId, DateTimeOffset now, CancellationToken cancellationToken = default)
+    {
+        if (!await roles.RoleExistsAsync(StaffRole))
+        {
+            await roles.CreateAsync(new IdentityRole(StaffRole));
+        }
+
+        var user = new AppUser { UserName = email, Email = email, EmailConfirmed = true, TenantId = tenantId, DisplayName = name, SelectedBusinessId = businessId };
+        var created = await users.CreateAsync(user, password);
+        if (created.Succeeded)
+        {
+            created = await users.AddToRoleAsync(user, StaffRole);
+        }
+
+        if (!created.Succeeded)
+        {
+            return Result.Failure<string>(ToError(created));
+        }
+
+        db.UserBusinesses.Add(UserBusiness.Create(tenantId, user.Id, businessId, UserBusinessRole.Staff, now));
+        return Result.Success(user.Id);
+    }
+
+    public async Task<IReadOnlyList<Guid>?> AssignedBusinessIdsAsync(Guid tenantId, string userId, CancellationToken cancellationToken = default)
+    {
+        if (await FindStaffAsync(tenantId, userId, cancellationToken) is null)
+        {
+            return null;
+        }
+
+        return await db.UserBusinesses.Where(x => x.UserId == userId).Select(x => x.BusinessId).ToListAsync(cancellationToken);
+    }
+
+    public async Task<Result<string>> UpdateStaffAsync(Guid tenantId, string userId, string name, IReadOnlyList<Guid> businessIds, DateTimeOffset now, CancellationToken cancellationToken = default)
+    {
+        var user = await FindStaffAsync(tenantId, userId, cancellationToken);
+        if (user is null)
+        {
+            return Result.Failure<string>(TeamErrors.NotStaff);
+        }
+
+        user.DisplayName = name;
+        var valid = await db.Businesses.Where(b => businessIds.Contains(b.Id)).Select(b => b.Id).ToListAsync(cancellationToken);
+        var current = await db.UserBusinesses.Where(x => x.UserId == userId).ToListAsync(cancellationToken);
+        db.UserBusinesses.RemoveRange(current.Where(x => !valid.Contains(x.BusinessId)));
+        foreach (var businessId in valid.Where(id => current.All(x => x.BusinessId != id)))
+        {
+            db.UserBusinesses.Add(UserBusiness.Create(tenantId, userId, businessId, UserBusinessRole.Staff, now));
+        }
+
+        if (user.SelectedBusinessId is { } selected && !valid.Contains(selected))
+        {
+            user.SelectedBusinessId = valid.Count > 0 ? valid[0] : null;
+        }
+
+        return Result.Success(NameOf(user));
+    }
+
+    public async Task<Result<string>> SetActiveAsync(Guid tenantId, string userId, bool active, CancellationToken cancellationToken = default)
+    {
+        var user = await FindStaffAsync(tenantId, userId, cancellationToken);
+        if (user is null)
+        {
+            return Result.Failure<string>(TeamErrors.NotStaff);
+        }
+
+        var result = await users.SetLockoutEnabledAsync(user, true);
+        if (result.Succeeded)
+        {
+            result = await users.SetLockoutEndDateAsync(user, active ? null : DateTimeOffset.MaxValue);
+        }
+
+        if (result.Succeeded && active)
+        {
+            result = await users.ResetAccessFailedCountAsync(user);
+        }
+
+        if (result.Succeeded)
+        {
+            result = await users.UpdateSecurityStampAsync(user);
+        }
+
+        return result.Succeeded ? Result.Success(NameOf(user)) : Result.Failure<string>(ToError(result));
+    }
+
+    public async Task<Result<string>> ResetPasswordAsync(Guid tenantId, string userId, string newPassword, CancellationToken cancellationToken = default)
+    {
+        var user = await FindStaffAsync(tenantId, userId, cancellationToken);
+        if (user is null)
+        {
+            return Result.Failure<string>(TeamErrors.NotStaff);
+        }
+
+        var token = await users.GeneratePasswordResetTokenAsync(user);
+        var result = await users.ResetPasswordAsync(user, token, newPassword);
+        return result.Succeeded ? Result.Success(NameOf(user)) : Result.Failure<string>(ToError(result));
+    }
+
+    public async Task<Result<string>> ResetTwoFactorAsync(Guid tenantId, string userId, CancellationToken cancellationToken = default)
+    {
+        var user = await FindStaffAsync(tenantId, userId, cancellationToken);
+        if (user is null)
+        {
+            return Result.Failure<string>(TeamErrors.NotStaff);
+        }
+
+        var result = await users.SetTwoFactorEnabledAsync(user, false);
+        if (result.Succeeded)
+        {
+            result = await users.ResetAuthenticatorKeyAsync(user);
+        }
+
+        return result.Succeeded ? Result.Success(NameOf(user)) : Result.Failure<string>(ToError(result));
+    }
+
+    private static string NameOf(AppUser user) => string.IsNullOrWhiteSpace(user.DisplayName) ? user.Email ?? user.Id : user.DisplayName;
+
+    private static Error ToError(IdentityResult result)
+    {
+        var fields = new Dictionary<string, string[]>();
+        foreach (var group in result.Errors.GroupBy(e => e.Code.StartsWith("Password", StringComparison.Ordinal) ? "TemporaryPassword" : "Email"))
+        {
+            fields[group.Key] = group.Select(e => e.Description).ToArray();
+        }
+
+        return new Error("Team.IdentityFailed", string.Join(" ", result.Errors.Select(e => e.Description)), fields);
+    }
+
+    private async Task<AppUser?> FindStaffAsync(Guid tenantId, string userId, CancellationToken cancellationToken)
+    {
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId && u.TenantId == tenantId, cancellationToken);
+        return user is null || (await OwnerIdsAsync(cancellationToken)).Contains(userId) ? null : user;
+    }
+
+    private async Task<List<string>> OwnerIdsAsync(CancellationToken cancellationToken) =>
+        await (from ur in db.UserRoles
+               join r in db.Roles on ur.RoleId equals r.Id
+               where r.Name == OwnerRole
+               select ur.UserId).ToListAsync(cancellationToken);
+}

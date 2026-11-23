@@ -1,0 +1,39 @@
+@* Side drawer anchored to the end edge (DS §6 "Dialog / side panel"): focus trapped, Esc closes. *@
+
+@if (Open)
+{
+    <div class="ib-side-panel__scrim" aria-hidden="true" @onclick="CloseAsync"></div>
+    <MudFocusTrap DefaultFocus="DefaultFocus.FirstChild">
+        <aside class="ib-side-panel" role="dialog" aria-modal="true" aria-labelledby="@_titleId" @onkeydown="OnKeyDownAsync">
+            <header class="ib-side-panel__header">
+                <h2 id="@_titleId" class="ib-section-title">@Title</h2>
+                <MudIconButton Icon="@Icons.Material.Filled.Close" aria-label="Close" OnClick="CloseAsync" />
+            </header>
+            <div class="ib-side-panel__body">
+                @ChildContent
+            </div>
+            @if (Actions is not null)
+            {
+                <footer class="ib-side-panel__footer">@Actions</footer>
+            }
+        </aside>
+    </MudFocusTrap>
+}
+
+@code {
+    private readonly string _titleId = $"side-panel-{Guid.NewGuid():N}";
+
+    [Parameter] public bool Open { get; set; }
+
+    [Parameter, EditorRequired] public string Title { get; set; } = string.Empty;
+
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+
+    [Parameter] public RenderFragment? Actions { get; set; }
+
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private Task CloseAsync() => OnClose.InvokeAsync();
+
+    private Task OnKeyDownAsync(KeyboardEventArgs e) => e.Key == "Escape" ? CloseAsync() : Task.CompletedTask;
+}

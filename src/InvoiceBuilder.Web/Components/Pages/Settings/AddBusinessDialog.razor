@@ -1,0 +1,71 @@
+@using InvoiceBuilder.Application.Businesses.Settings
+@inject MediatR.ISender Sender
+@inject NavigationManager Navigation
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+
+<MudDialog aria-labelledby="add-business-title">
+    <TitleContent>
+        <h2 id="add-business-title" class="ib-section-title">Add a business</h2>
+    </TitleContent>
+    <DialogContent>
+        <p class="ib-help" style="margin-top: 0;">It gets its own numbering (QUO-, INV-, RCT-, CRN-) and the default theme. You can change these later.</p>
+        @if (_formError is not null)
+        {
+            <MudAlert Severity="Severity.Error" role="alert" Class="mb-4">@_formError</MudAlert>
+        }
+        <div class="ib-form-grid">
+            <MudTextField @bind-Value="_tradingName" Label="Trading name" Required="true" Variant="Variant.Outlined" AutoFocus="true" Error="@HasError("TradingName")" ErrorText="@ErrorFor("TradingName")" />
+            <MudTextField @bind-Value="_registeredName" Label="Registered name" Variant="Variant.Outlined" />
+            <MudTextField @bind-Value="_email" Label="Email" InputType="InputType.Email" Required="true" Variant="Variant.Outlined" Error="@HasError("Email")" ErrorText="@ErrorFor("Email")" />
+            <MudTextField @bind-Value="_address" Label="Address" Lines="2" Variant="Variant.Outlined" Class="ib-form-grid__wide" />
+        </div>
+    </DialogContent>
+    <DialogActions>
+        <MudButton Variant="Variant.Text" OnClick="Cancel" Disabled="_saving">Cancel</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveAsync" Disabled="_saving">Add business</MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] private IMudDialogInstance Dialog { get; set; } = default!;
+
+    private string _tradingName = "";
+    private string _registeredName = "";
+    private string _email = "";
+    private string _address = "";
+    private string? _formError;
+    private bool _saving;
+    private IReadOnlyDictionary<string, string[]> _fieldErrors = new Dictionary<string, string[]>();
+
+    private void Cancel() => Dialog.Cancel();
+
+    private async Task SaveAsync()
+    {
+        _saving = true;
+        _formError = null;
+        _fieldErrors = new Dictionary<string, string[]>();
+        try
+        {
+            var result = await Sender.Send(new AddBusinessCommand(_tradingName, _registeredName, _email, _address));
+            if (result.IsFailure)
+            {
+                _fieldErrors = result.Error.FieldErrors ?? new Dictionary<string, string[]>();
+                _formError = result.Error.Message;
+                Announcer.Announce(result.Error.Message);
+                return;
+            }
+
+            Dialog.Close(DialogResult.Ok(result.Value));
+            // The new business is now selected; reissue the sign-in so its claim takes effect.
+            Navigation.NavigateTo("/account/refresh?returnUrl=%2Fsettings%2Fprofile", forceLoad: true);
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private bool HasError(string field) => _fieldErrors.ContainsKey(field);
+
+    private string? ErrorFor(string field) => _fieldErrors.TryGetValue(field, out var messages) ? string.Join(" ", messages) : null;
+}

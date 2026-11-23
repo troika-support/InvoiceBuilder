@@ -1,0 +1,26 @@
+@* App frame: skip link, sidebar (full or rail), main region, theme mode (design-system §7). *@
+@inherits LayoutComponentBase
+
+<MudThemeProvider Theme="IbTheme.Theme" @bind-IsDarkMode="_dark" />
+<MudPopoverProvider />
+<MudDialogProvider />
+<MudSnackbarProvider />
+
+<div class="ib-shell" data-theme="@(_dark ? "dark" : "light")">
+    <a class="ib-skip-link" href="#main">Skip to content</a>
+    <SideNav Rail="Rail" />
+    <main id="main" class="ib-main" tabindex="-1">
+        @Body
+    </main>
+    <div class="ib-visually-hidden" aria-live="polite" aria-atomic="true">@LiveMessage</div>
+</div>
+
+@code {
+    private bool _dark;
+
+    /// <summary>Editor and designer pages render the 72 px icon rail.</summary>
+    [CascadingParameter(Name = "UseRail")] public bool Rail { get; set; }
+
+    /// <summary>Set by the announcer service for screen-reader messages (saved, sent, errors).</summary>
+    [CascadingParameter(Name = "LiveMessage")] public string? LiveMessage { get; set; }
+}

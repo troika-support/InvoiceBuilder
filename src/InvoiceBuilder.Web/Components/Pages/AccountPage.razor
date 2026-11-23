@@ -1,0 +1,78 @@
+@page "/profile"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize(Policy = "Staff")]
+@using InvoiceBuilder.Application.Shell
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+
+<PageTitle>Your account · Invoice Builder</PageTitle>
+
+<h1 class="ib-page-title">Your account</h1>
+
+@if (_loadError is not null)
+{
+    <EmptyState Title="@_loadError" />
+}
+else if (!_loaded)
+{
+    <MudProgressLinear Indeterminate="true" aria-label="Loading your account" />
+}
+else
+{
+    <section class="ib-card" style="padding: 20px; max-width: 560px;" aria-labelledby="name-heading">
+        <h2 id="name-heading" class="ib-card__title">Your name</h2>
+        <p class="ib-help" style="margin-top: 0;">Used to greet you on the dashboard.</p>
+        @if (_error is not null)
+        {
+            <MudAlert Severity="Severity.Error" role="alert" Class="mb-4">@_error</MudAlert>
+        }
+        <MudTextField @bind-Value="_name" Label="Full name (required)" Variant="Variant.Outlined" MaxLength="100"
+                      UserAttributes="@(new Dictionary<string, object?> { ["autocomplete"] = "name" })" />
+        <div class="ib-settings__footer" style="margin-top: 16px;">
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveAsync" Disabled="_saving" Class="ib-motion ib-motion-press">Save name</MudButton>
+        </div>
+    </section>
+}
+
+@code {
+    private string _name = string.Empty;
+    private bool _loaded;
+    private bool _saving;
+    private string? _error;
+    private string? _loadError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var account = await Sender.Send(new GetMyAccountQuery());
+        if (account.IsFailure)
+        {
+            _loadError = account.Error.Message;
+            return;
+        }
+
+        // A name that is still the sign-in email is shown empty so it's clear one hasn't been set.
+        _name = account.Value.DisplayName.Contains('@', StringComparison.Ordinal) ? string.Empty : account.Value.DisplayName;
+        _loaded = true;
+    }
+
+    private async Task SaveAsync()
+    {
+        _saving = true;
+        _error = null;
+        try
+        {
+            var result = await Sender.Send(new SetMyDisplayNameCommand(_name));
+            if (result.IsFailure)
+            {
+                _error = result.Error.Message;
+                Announcer.Announce(result.Error.Message);
+                return;
+            }
+
+            Announcer.Toast("Your name was saved.", Severity.Success);
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+}

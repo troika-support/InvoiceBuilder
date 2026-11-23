@@ -1,0 +1,106 @@
+@* Sidebar navigation by role (design-system §7). Business switcher is a separate component (prompt 09). *@
+@inject NavigationManager Nav
+@implements IDisposable
+
+<nav id="ib-nav" class="ib-nav @(Mini ? "ib-nav--rail" : null) @(Rail && Expanded ? "ib-nav--overlay" : null) @(Open ? "ib-nav--open" : null)" aria-label="Main">
+    <div style="display:flex; align-items:center; gap:10px; padding:0 8px">
+        <span class="ib-nav__mark" aria-hidden="true">IB</span>
+        @if (!Mini)
+        {
+            <span style="font-weight:700; font-size:16px; color:#FFFFFF">Invoice Builder</span>
+        }
+    </div>
+
+    @if (Rail)
+    {
+        <button type="button" class="ib-nav__link ib-nav__button ib-motion" aria-expanded="@(Expanded ? "true" : "false")" aria-controls="ib-nav" aria-label="@(Expanded ? "Collapse menu" : "Expand menu")" title="@(Mini ? "Expand menu" : null)" @onclick="OnToggleExpanded">
+            <MudIcon Icon="@(Expanded ? Icons.Material.Outlined.MenuOpen : Icons.Material.Outlined.Menu)" Size="Size.Small" aria-hidden="true" />
+            @if (!Mini) { <span>Collapse menu</span> }
+        </button>
+    }
+
+    @if (!Mini)
+    {
+        <BusinessSwitcher />
+    }
+
+    <div style="display:flex; flex-direction:column; gap:2px">
+        @foreach (var item in Items)
+        {
+            <AuthorizeView Policy="@item.Policy">
+                <a class="ib-nav__link ib-motion" href="@item.Href" aria-current="@(IsCurrent(item.Href) ? "page" : null)" aria-label="@(Mini ? item.Text : null)" title="@(Mini ? item.Text : null)">
+                    <MudIcon Icon="@item.Icon" Size="Size.Small" aria-hidden="true" />
+                    @if (!Mini) { <span>@item.Text</span> }
+                </a>
+            </AuthorizeView>
+        }
+    </div>
+
+    <div class="ib-nav__footer">
+    <AuthorizeView Policy="Owner">
+        <a class="ib-nav__link ib-motion" href="/settings/profile" aria-current="@(IsCurrent("/settings") ? "page" : null)" aria-label="@(Mini ? "Settings" : null)" title="@(Mini ? "Settings" : null)">
+            <MudIcon Icon="@Icons.Material.Outlined.Settings" Size="Size.Small" aria-hidden="true" />
+            @if (!Mini) { <span>Settings</span> }
+        </a>
+    </AuthorizeView>
+
+    <button type="button" class="ib-nav__link ib-nav__button ib-motion" aria-pressed="@(Dark ? "true" : "false")" aria-label="@(Mini ? "Dark mode" : null)" title="@(Mini ? "Dark mode" : null)" @onclick="OnToggleDark">
+        <MudIcon Icon="@(Dark ? Icons.Material.Outlined.LightMode : Icons.Material.Outlined.DarkMode)" Size="Size.Small" aria-hidden="true" />
+        @if (!Mini) { <span>Dark mode</span> }
+    </button>
+    <form method="post" action="/account/sign-out" data-enhance="false">
+        <AntiforgeryToken />
+        <button type="submit" class="ib-nav__link ib-nav__button ib-motion" aria-label="@(Mini ? "Sign out" : null)" title="@(Mini ? "Sign out" : null)">
+            <MudIcon Icon="@Icons.Material.Outlined.Logout" Size="Size.Small" aria-hidden="true" />
+            @if (!Mini) { <span>Sign out</span> }
+        </button>
+    </form>
+    </div>
+</nav>
+
+@code {
+    /// <summary>Editor and designer routes, where the nav defaults to the 72 px rail.</summary>
+    [Parameter] public bool Rail { get; set; }
+
+    /// <summary>On a rail route, shows the full menu as an overlay.</summary>
+    [Parameter] public bool Expanded { get; set; }
+
+    [Parameter] public EventCallback OnToggleExpanded { get; set; }
+
+    private bool Mini => Rail && !Expanded;
+
+    /// <summary>Drawer open state below 960 px.</summary>
+    [Parameter] public bool Open { get; set; }
+
+    [Parameter] public bool Dark { get; set; }
+
+    [Parameter] public EventCallback OnToggleDark { get; set; }
+
+    private sealed record NavItem(string Text, string Href, string Icon, string Policy);
+
+    private static readonly NavItem[] Items =
+    [
+        new("Dashboard", "/", Icons.Material.Outlined.Dashboard, "Staff"),
+        new("Quotes", "/quotes", Icons.Material.Outlined.RequestQuote, "Staff"),
+        new("Invoices", "/invoices", Icons.Material.Outlined.ReceiptLong, "Staff"),
+        new("Receipts & credit notes", "/receipts", Icons.Material.Outlined.TaskAlt, "Staff"),
+        new("Clients", "/clients", Icons.Material.Outlined.Groups, "Staff"),
+        new("Catalogue", "/catalogue", Icons.Material.Outlined.Inventory2, "Staff"),
+        new("Templates", "/templates", Icons.Material.Outlined.DesignServices, "Owner"),
+        new("Payments", "/payments", Icons.Material.Outlined.Payments, "Staff"),
+        new("Recurring", "/recurring", Icons.Material.Outlined.EventRepeat, "Owner"),
+    ];
+
+    protected override void OnInitialized() => Nav.LocationChanged += OnLocationChanged;
+
+    private void OnLocationChanged(object? sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs e) =>
+        _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Nav.LocationChanged -= OnLocationChanged;
+
+    private bool IsCurrent(string href)
+    {
+        var path = "/" + Nav.ToBaseRelativePath(Nav.Uri).Split('?', '#')[0];
+        return href == "/" ? path == "/" : path.StartsWith(href, StringComparison.OrdinalIgnoreCase);
+    }
+}

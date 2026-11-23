@@ -1,0 +1,113 @@
+using System.ComponentModel.DataAnnotations;
+using InvoiceBuilder.Domain.Businesses;
+using InvoiceBuilder.Infrastructure.Persistence;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.RazorPages;
+using Microsoft.EntityFrameworkCore;
+using InvoiceBuilder.Web.Security;
+
+namespace InvoiceBuilder.Web.Pages.Account;
+
+/// <summary>First-run setup (spec 5.1): creates the tenant and first Owner, and only works while no users exist.</summary>
+[AllowAnonymous]
+[Microsoft.AspNetCore.RateLimiting.EnableRateLimiting(InvoiceBuilder.Web.Security.AuthRateLimit.Policy)]
+public sealed class SetupModel(
+    AppDbContext db,
+    UserManager<AppUser> users,
+    RoleManager<IdentityRole> roles,
+    SignInManager<AppUser> signIn,
+    IWebHostEnvironment environment,
+    TimeProvider timeProvider) : PageModel
+{
+    private static readonly SemaphoreSlim Gate = new(1, 1);
+
+    [BindProperty, Required, StringLength(200)]
+    public string TenantName { get; set; } = string.Empty;
+
+    [BindProperty, Required, EmailAddress]
+    public string Email { get; set; } = string.Empty;
+
+    [BindProperty, Required, DataType(DataType.Password)]
+    public string Password { get; set; } = string.Empty;
+
+    [BindProperty, Required, DataType(DataType.Password)]
+    public string ConfirmPassword { get; set; } = string.Empty;
+
+    public string? Error { get; private set; }
+
+    public async Task<IActionResult> OnGetAsync(CancellationToken cancellationToken) =>
+        await IsSetupOpenAsync(cancellationToken) ? Page() : RedirectToPage("/Account/SignIn");
+
+    public async Task<IActionResult> OnPostAsync(CancellationToken cancellationToken)
+    {
+        await Gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (!await IsSetupOpenAsync(cancellationToken))
+            {
+                return RedirectToPage("/Account/SignIn");
+            }
+
+            if (!ModelState.IsValid)
+            {
+                Error = "Fill in every field.";
+                return Page();
+            }
+
+            if (!string.Equals(Password, ConfirmPassword, StringComparison.Ordinal))
+            {
+                Error = "The passwords do not match.";
+                return Page();
+            }
+
+            // Development: attach the Owner to the tenant created by DevDataSeeder so its sample data is visible.
+            var existing = environment.IsDevelopment()
+                ? await db.Tenants.IgnoreQueryFilters().FirstOrDefaultAsync(t => t.Id == DevCurrentTenant.DevTenantId, cancellationToken)
+                : null;
+            var tenant = existing ?? Tenant.Create(TenantName.Trim(), timeProvider.GetUtcNow());
+            if (existing is null)
+            {
+                db.Tenants.Add(tenant);
+                await db.SaveChangesAsync(cancellationToken);
+            }
+
+            if (!await roles.RoleExistsAsync(Roles.Owner))
+            {
+                await roles.CreateAsync(new IdentityRole(Roles.Owner));
+            }
+
+            var user = new AppUser { UserName = Email, Email = Email, EmailConfirmed = true, TenantId = tenant.Id, DisplayName = Email };
+            var created = await users.CreateAsync(user, Password);
+            if (created.Succeeded)
+            {
+                created = await users.AddToRoleAsync(user, Roles.Owner);
+            }
+
+            if (!created.Succeeded)
+            {
+                if (existing is null)
+                {
+                    db.Tenants.Remove(tenant);
+                    await db.SaveChangesAsync(cancellationToken);
+                }
+
+                Error = string.Join(" ", created.Errors.Select(e => e.Description));
+                return Page();
+            }
+
+            await signIn.SignInAsync(user, isPersistent: true);
+            return LocalRedirect(TwoFactorGate.SetupPath);
+        }
+        finally
+        {
+            Gate.Release();
+        }
+    }
+
+    internal static async Task<bool> IsSetupOpenAsync(UserManager<AppUser> users, CancellationToken cancellationToken) =>
+        !await users.Users.AnyAsync(cancellationToken);
+
+    private Task<bool> IsSetupOpenAsync(CancellationToken cancellationToken) => IsSetupOpenAsync(users, cancellationToken);
+}

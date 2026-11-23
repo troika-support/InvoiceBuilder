@@ -1,0 +1,39 @@
+using InvoiceBuilder.Domain.Common;
+using InvoiceBuilder.Domain.Payments;
+using MediatR;
+
+namespace InvoiceBuilder.Application.Payments;
+
+public sealed record LedgerRow(Guid Id, DateTimeOffset PaidAt, string ClientName, string AppliedTo, PaymentMethod Method, decimal Amount, string Currency, PaymentStatus Status);
+
+public sealed record OpenInvoiceRow(Guid Id, string Number, DateOnly? DueDate, decimal Balance, string Currency, decimal Paid = 0m, IReadOnlyList<decimal>? InstalmentAmounts = null);
+
+public interface IPaymentQueries
+{
+    Task<IReadOnlyList<LedgerRow>> LedgerAsync(DateTimeOffset from, DateTimeOffset until, CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<OpenInvoiceRow>> OpenInvoicesAsync(Guid clientId, CancellationToken cancellationToken = default);
+
+    Task<string?> NextReceiptNumberAsync(CancellationToken cancellationToken = default);
+}
+
+public sealed record GetPaymentLedgerQuery(DateTimeOffset From, DateTimeOffset Until) : IRequest<Result<IReadOnlyList<LedgerRow>>>;
+
+public sealed record GetOpenInvoicesQuery(Guid ClientId) : IRequest<Result<IReadOnlyList<OpenInvoiceRow>>>;
+
+public sealed record GetNextReceiptNumberQuery : IRequest<Result<string?>>;
+
+public sealed class PaymentQueryHandlers(IPaymentQueries queries)
+    : IRequestHandler<GetPaymentLedgerQuery, Result<IReadOnlyList<LedgerRow>>>,
+      IRequestHandler<GetOpenInvoicesQuery, Result<IReadOnlyList<OpenInvoiceRow>>>,
+      IRequestHandler<GetNextReceiptNumberQuery, Result<string?>>
+{
+    public async Task<Result<IReadOnlyList<LedgerRow>>> Handle(GetPaymentLedgerQuery request, CancellationToken cancellationToken) =>
+        Result.Success(await queries.LedgerAsync(request.From, request.Until, cancellationToken));
+
+    public async Task<Result<IReadOnlyList<OpenInvoiceRow>>> Handle(GetOpenInvoicesQuery request, CancellationToken cancellationToken) =>
+        Result.Success(await queries.OpenInvoicesAsync(request.ClientId, cancellationToken));
+
+    public async Task<Result<string?>> Handle(GetNextReceiptNumberQuery request, CancellationToken cancellationToken) =>
+        Result.Success(await queries.NextReceiptNumberAsync(cancellationToken));
+}

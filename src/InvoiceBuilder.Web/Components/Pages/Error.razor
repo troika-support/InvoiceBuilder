@@ -1,0 +1,21 @@
+@page "/Error"
+@using System.Diagnostics
+
+<PageTitle>Something went wrong · Invoice Builder</PageTitle>
+
+<h1 class="ib-page-title">Something went wrong</h1>
+<EmptyState Title="We couldn't finish that request" Message="@Message" ActionText="Go to dashboard" ActionHref="/" />
+
+@code {
+    [CascadingParameter]
+    private HttpContext? HttpContext { get; set; }
+
+    private string Message => string.IsNullOrEmpty(_requestId)
+        ? "Please try again."
+        : $"Please try again. If it keeps happening, quote reference {_requestId}.";
+
+    private string? _requestId;
+
+    protected override void OnInitialized() =>
+        _requestId = Activity.Current?.Id ?? HttpContext?.TraceIdentifier;
+}

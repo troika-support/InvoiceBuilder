@@ -1,0 +1,207 @@
+@using InvoiceBuilder.Application.Clients
+@inject MediatR.ISender Sender
+@inject IDisplayFormatter Format
+@inject TimeProvider Clock
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+@inject Microsoft.Extensions.Options.IOptions<InvoiceBuilder.Application.Options.AppOptions> App
+
+<MudDialog aria-labelledby="statement-title">
+    <TitleContent>
+        <h2 id="statement-title" class="ib-section-title">Statement for @ClientName</h2>
+    </TitleContent>
+    <DialogContent>
+        @if (_error is not null)
+        {
+            <MudAlert Severity="Severity.Error" role="alert" Class="mb-4">@_error</MudAlert>
+        }
+        <div class="ib-form-grid">
+            <MudSelect T="string" Value="_preset" ValueChanged="OnPresetAsync" Label="Period" Variant="Variant.Outlined">
+                @foreach (var p in Presets)
+                {
+                    <MudSelectItem T="string" Value="@p">@p</MudSelectItem>
+                }
+            </MudSelect>
+            <MudDatePicker Date="_from" DateChanged="OnFromAsync" Label="From" Variant="Variant.Outlined" DateFormat="d MMM yyyy" />
+            <MudDatePicker Date="_to" DateChanged="OnToAsync" Label="To" Variant="Variant.Outlined" DateFormat="d MMM yyyy" />
+        </div>
+
+        <div class="ib-card" style="padding: 12px 16px; margin: 16px 0;" aria-live="polite">
+            @if (_statement is null)
+            {
+                <MudProgressLinear Indeterminate="true" aria-label="Working out the statement" />
+            }
+            else if (_statement.Sections.Count == 0)
+            {
+                <p style="margin: 0;">No invoices, credit notes or payments up to @Format.Date(new DateTimeOffset(_statement.To.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero)).</p>
+            }
+            else
+            {
+                <table class="ib-table">
+                    <caption class="ib-visually-hidden">Statement summary by currency</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">Currency</th>
+                            <th scope="col" class="ib-num">Opening</th>
+                            <th scope="col" class="ib-num">Invoiced</th>
+                            <th scope="col" class="ib-num">Credits &amp; payments</th>
+                            <th scope="col" class="ib-num">Closing</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var s in _statement.Sections)
+                        {
+                            <tr>
+                                <td>@(s.Currency == "ZWG" ? "ZiG" : s.Currency)</td>
+                                <td class="ib-num"><MoneyText Amount="s.Opening" Currency="@s.Currency" /></td>
+                                <td class="ib-num"><MoneyText Amount="s.Invoiced" Currency="@s.Currency" /></td>
+                                <td class="ib-num"><MoneyText Amount="s.Credited + s.Paid" Currency="@s.Currency" /></td>
+                                <td class="ib-num"><strong><MoneyText Amount="s.Closing" Currency="@s.Currency" /></strong></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        </div>
+
+        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px;">
+            <MudButton Variant="Variant.Outlined" Href="@FileUrl("pdf")" Target="_blank" Disabled="@(_statement is null)">Download PDF</MudButton>
+            <MudButton Variant="Variant.Outlined" Href="@FileUrl("csv")" Disabled="@(_statement is null)">Download CSV</MudButton>
+        </div>
+
+        <h3 class="ib-card__title">Email it</h3>
+        <MudTextField @bind-Value="_email" Label="Email address (required to send)" InputType="InputType.Email" Variant="Variant.Outlined" Class="mb-3"
+                      UserAttributes="@(new Dictionary<string, object?> { ["autocomplete"] = "email" })" />
+        <MudTextField @bind-Value="_message" Label="Message (optional)" Lines="3" MaxLength="1000" Variant="Variant.Outlined" />
+        <p class="ib-help mt-2">The statement PDF is attached. The result shows in the client's activity.</p>
+    </DialogContent>
+    <DialogActions>
+        <MudButton Variant="Variant.Text" OnClick="Cancel" Disabled="_sending">Close</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SendAsync" Disabled="@(_sending || _statement is null)">Send statement</MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    private static readonly string[] Presets = ["This month", "Last month", "Last 3 months", "This year", "Last year", "Custom"];
+
+    [CascadingParameter] private IMudDialogInstance Dialog { get; set; } = default!;
+
+    [Parameter] public Guid ClientId { get; set; }
+
+    [Parameter] public string ClientName { get; set; } = string.Empty;
+
+    [Parameter] public string? ClientEmail { get; set; }
+
+    private string _preset = "Last 3 months";
+    private DateTime? _from;
+    private DateTime? _to;
+    private string? _email;
+    private string? _message;
+    private string? _error;
+    private bool _sending;
+    private ClientStatement? _statement;
+
+    private DateOnly Today
+    {
+        get
+        {
+            var zone = TimeZoneInfo.FindSystemTimeZoneById(App.Value.TimeZone);
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(Clock.GetUtcNow(), zone).DateTime);
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        _email = ClientEmail;
+        await OnPresetAsync(_preset);
+    }
+
+    private async Task OnPresetAsync(string preset)
+    {
+        _preset = preset;
+        var today = Today;
+        var month = new DateOnly(today.Year, today.Month, 1);
+        (DateOnly From, DateOnly To)? range = preset switch
+        {
+            "This month" => (month, today),
+            "Last month" => (month.AddMonths(-1), month.AddDays(-1)),
+            "Last 3 months" => (month.AddMonths(-2), today),
+            "This year" => (new DateOnly(today.Year, 1, 1), today),
+            "Last year" => (new DateOnly(today.Year - 1, 1, 1), new DateOnly(today.Year - 1, 12, 31)),
+            _ => null,
+        };
+        if (range is { } r)
+        {
+            _from = r.From.ToDateTime(TimeOnly.MinValue);
+            _to = r.To.ToDateTime(TimeOnly.MinValue);
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task OnFromAsync(DateTime? value)
+    {
+        _from = value;
+        _preset = "Custom";
+        await LoadAsync();
+    }
+
+    private async Task OnToAsync(DateTime? value)
+    {
+        _to = value;
+        _preset = "Custom";
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _error = null;
+        _statement = null;
+        if (_from is not { } from || _to is not { } to)
+        {
+            _error = "Choose both dates.";
+            return;
+        }
+
+        var result = await Sender.Send(new GetClientStatementQuery(ClientId, DateOnly.FromDateTime(from), DateOnly.FromDateTime(to)));
+        if (result.IsFailure)
+        {
+            _error = result.Error.Message;
+            return;
+        }
+
+        _statement = result.Value;
+    }
+
+    private string? FileUrl(string format) => _statement is null
+        ? null
+        : $"/api/clients/{ClientId}/statement?from={_statement.From:yyyy-MM-dd}&to={_statement.To:yyyy-MM-dd}&format={format}";
+
+    private void Cancel() => Dialog.Cancel();
+
+    private async Task SendAsync()
+    {
+        if (_statement is null)
+        {
+            return;
+        }
+
+        _sending = true;
+        _error = null;
+        try
+        {
+            var result = await Sender.Send(new SendClientStatementCommand(ClientId, _statement.From, _statement.To, _email ?? string.Empty, _message));
+            if (result.IsFailure)
+            {
+                _error = result.Error.Message;
+                Announcer.Announce(result.Error.Message);
+                return;
+            }
+
+            Dialog.Close(DialogResult.Ok(true));
+        }
+        finally
+        {
+            _sending = false;
+        }
+    }
+}

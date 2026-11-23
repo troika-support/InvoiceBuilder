@@ -1,0 +1,137 @@
+@using InvoiceBuilder.Application.Catalogue
+@using InvoiceBuilder.Domain.Common
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+
+<SidePanel Open="Open" Title="@(Existing is null ? "New item" : "Edit item")" OnClose="CancelAsync">
+    <ChildContent>
+        @if (_formError is not null)
+        {
+            <MudAlert Severity="Severity.Error" role="alert" Class="mb-4">@_formError</MudAlert>
+        }
+        <div class="ib-form-stack">
+            <MudTextField @bind-Value="_name" Label="Name" Required="true" Variant="Variant.Outlined"
+                          Error="@HasError("Input.Name")" ErrorText="@ErrorFor("Input.Name")" />
+            <MudTextField @bind-Value="_description" Label="Description" Lines="3" Variant="Variant.Outlined"
+                          Error="@HasError("Input.Description")" ErrorText="@ErrorFor("Input.Description")" />
+            <MudTextField @bind-Value="_unit" Label="Unit" HelperText="For example: hour, item, month" Variant="Variant.Outlined" />
+            <MudNumericField T="decimal" @bind-Value="_unitPrice" Label="Unit price" Min="0m" Format="N2" Variant="Variant.Outlined"
+                             Error="@HasError("Input.UnitPrice")" ErrorText="@ErrorFor("Input.UnitPrice")" />
+            <MudSelect T="string" @bind-Value="_currency" Label="Currency" Variant="Variant.Outlined">
+                <MudSelectItem Value="@("USD")">USD</MudSelectItem>
+                <MudSelectItem Value="@("ZWG")">ZiG</MudSelectItem>
+            </MudSelect>
+            <MudSelect T="Guid?" @bind-Value="_taxRateId" Label="Tax" Variant="Variant.Outlined">
+                <MudSelectItem T="Guid?" Value="@((Guid?)null)">No tax</MudSelectItem>
+                @foreach (var rate in _taxRates)
+                {
+                    <MudSelectItem T="Guid?" Value="@((Guid?)rate.Id)">@rate.Name</MudSelectItem>
+                }
+            </MudSelect>
+            <MudTextField @bind-Value="_hsCode" Label="HS code" HelperText="Optional. Needed once fiscalisation is on." Variant="Variant.Outlined"
+                          InputMode="InputMode.numeric" MaxLength="8"
+                          Error="@HasError("Input.HsCode")" ErrorText="@ErrorFor("Input.HsCode")" />
+            <MudCheckBox T="bool" @bind-Value="_isRecurring" Color="Color.Primary" Label="Recurring (billed every period)" />
+        </div>
+    </ChildContent>
+    <Actions>
+        <MudButton Variant="Variant.Text" OnClick="CancelAsync" Disabled="_saving">Cancel</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveAsync" Disabled="_saving">@(Existing is null ? "Add item" : "Save changes")</MudButton>
+    </Actions>
+</SidePanel>
+
+@code {
+    [Parameter] public bool Open { get; set; }
+
+    [Parameter] public CatalogueItemRow? Existing { get; set; }
+
+    /// <summary>Raised with the saved item's id, or null when cancelled.</summary>
+    [Parameter] public EventCallback<Guid?> OnClosed { get; set; }
+
+    private bool _wasOpen;
+    private IReadOnlyList<TaxRateOption> _taxRates = [];
+    private string _name = "";
+    private string? _description;
+    private string? _unit;
+    private decimal _unitPrice;
+    private string _currency = "USD";
+    private Guid? _taxRateId;
+    private string? _hsCode;
+    private bool _isRecurring;
+    private string? _formError;
+    private bool _saving;
+    private IReadOnlyDictionary<string, string[]> _fieldErrors = new Dictionary<string, string[]>();
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Open && !_wasOpen)
+        {
+            _wasOpen = true;
+            Reset();
+            var rates = await Sender.Send(new GetTaxRateOptionsQuery());
+            _taxRates = rates.IsSuccess ? rates.Value : [];
+        }
+
+        _wasOpen = Open;
+    }
+
+    private void Reset()
+    {
+        _formError = null;
+        _fieldErrors = new Dictionary<string, string[]>();
+        _name = Existing?.Name ?? "";
+        _description = Existing?.Description;
+        _unit = Existing?.Unit;
+        _unitPrice = Existing?.UnitPrice ?? 0m;
+        _currency = Existing?.Currency ?? "USD";
+        _taxRateId = Existing?.TaxRateId;
+        _hsCode = Existing?.HsCode;
+        _isRecurring = Existing?.IsRecurring ?? false;
+    }
+
+    private Task CancelAsync() => _saving ? Task.CompletedTask : OnClosed.InvokeAsync(null);
+
+    private async Task SaveAsync()
+    {
+        _saving = true;
+        _formError = null;
+        _fieldErrors = new Dictionary<string, string[]>();
+        try
+        {
+            var input = new CatalogueItemInput(_name, _description, _unit, _unitPrice, _currency, _taxRateId, _hsCode, _isRecurring);
+            Error? error;
+            Guid id;
+            if (Existing is null)
+            {
+                var created = await Sender.Send(new CreateCatalogueItemCommand(input));
+                error = created.IsFailure ? created.Error : null;
+                id = created.IsSuccess ? created.Value : Guid.Empty;
+            }
+            else
+            {
+                var updated = await Sender.Send(new UpdateCatalogueItemCommand(Existing.Id, input));
+                error = updated.IsFailure ? updated.Error : null;
+                id = Existing.Id;
+            }
+
+            if (error is not null)
+            {
+                _fieldErrors = error.FieldErrors ?? new Dictionary<string, string[]>();
+                _formError = error.Message;
+                Announcer.Announce(error.Message);
+                return;
+            }
+
+            _saving = false;
+            await OnClosed.InvokeAsync(id);
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private bool HasError(string field) => _fieldErrors.ContainsKey(field);
+
+    private string? ErrorFor(string field) => _fieldErrors.TryGetValue(field, out var messages) ? string.Join(" ", messages) : null;
+}

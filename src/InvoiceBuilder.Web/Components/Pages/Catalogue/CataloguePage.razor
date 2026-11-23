@@ -1,0 +1,209 @@
+@page "/catalogue"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize(Policy = "Staff")]
+@using InvoiceBuilder.Application.Catalogue
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Application.Abstractions.IDisplayFormatter Format
+@inject IDialogService Dialogs
+@inject ISnackbar Snackbar
+
+<PageTitle>Catalogue · Invoice Builder</PageTitle>
+
+<div class="ib-page-header">
+    <div>
+        <h1 class="ib-page-title">Catalogue</h1>
+        @if (_items is not null)
+        {
+            <p class="ib-help" style="margin: 0;">@(_activeCount == 1 ? "1 item" : $"{_activeCount} items") you can add to quotes and invoices</p>
+        }
+    </div>
+    <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="() => Edit(null)" Disabled="@(_loadError is not null)">New item</MudButton>
+</div>
+
+@if (_loadError is not null)
+{
+    <EmptyState Title="@_loadError" Message="Add a business or pick one in the sidebar." />
+}
+else if (_items is null)
+{
+    <MudProgressLinear Indeterminate="true" aria-label="Loading catalogue" />
+}
+else
+{
+    <section class="ib-card" aria-label="Catalogue items" style="padding: 20px;">
+        <div class="ib-clients__tools">
+            <MudTextField T="string" Value="_search" ValueChanged="OnSearchAsync" Immediate="true" DebounceInterval="300" Label="Search by name or description"
+                          Variant="Variant.Outlined" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Clearable="true" Class="ib-clients__search" />
+            <MudSwitch T="bool" Value="_showArchived" ValueChanged="OnShowArchivedAsync" Color="Color.Primary" Label="Show archived" />
+        </div>
+
+        @if (_items.Count == 0)
+        {
+            <EmptyState Title="@(string.IsNullOrWhiteSpace(_search) ? "No catalogue items yet" : "No items match")"
+                        Message="Save the things you sell often, then add them to a document in one step." />
+        }
+        else
+        {
+            <div style="overflow-x: auto;">
+                <table class="ib-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">Name</th>
+                            <th scope="col">Description</th>
+                            <th scope="col">Unit</th>
+                            <th scope="col" class="ib-num">Price</th>
+                            <th scope="col">Currency</th>
+                            <th scope="col">Tax</th>
+                            <th scope="col">HS code</th>
+                            <th scope="col">Recurring</th>
+                            <th scope="col"><span class="visually-hidden">Actions</span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var item in _items)
+                        {
+                            <tr>
+                                <td>
+                                    @item.Name
+                                    @if (item.IsArchived)
+                                    {
+                                        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">Archived</MudChip>
+                                    }
+                                </td>
+                                <td>@(item.Description ?? "—")</td>
+                                <td>@(item.Unit ?? "—")</td>
+                                <td class="ib-num">@Format.Money(item.UnitPrice, item.Currency, showCurrency: false)</td>
+                                <td>@(item.Currency == "ZWG" ? "ZiG" : item.Currency)</td>
+                                <td>@(item.TaxName ?? "No tax")</td>
+                                <td>@(item.HsCode ?? "—")</td>
+                                <td>@(item.IsRecurring ? "Yes" : "No")</td>
+                                <td style="white-space: nowrap;">
+                                    <MudIconButton Icon="@Icons.Material.Filled.Edit" aria-label="@($"Edit {item.Name}")" OnClick="() => Edit(item)" />
+                                    @if (item.IsArchived)
+                                    {
+                                        <MudIconButton Icon="@Icons.Material.Filled.Unarchive" aria-label="@($"Restore {item.Name}")" OnClick="() => SetArchivedAsync(item, false)" />
+                                    }
+                                    else if (item.IsUsed)
+                                    {
+                                        <MudIconButton Icon="@Icons.Material.Filled.Archive" aria-label="@($"Archive {item.Name}")" OnClick="() => SetArchivedAsync(item, true)" />
+                                    }
+                                    else
+                                    {
+                                        <MudIconButton Icon="@Icons.Material.Filled.Delete" aria-label="@($"Delete {item.Name}")" OnClick="() => DeleteAsync(item)" />
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+}
+
+<CatalogueDrawer Open="_drawerOpen" Existing="_drawerItem" OnClosed="OnDrawerClosedAsync" />
+
+@code {
+    private IReadOnlyList<CatalogueItemRow>? _items;
+    private string? _loadError;
+    private string? _search;
+    private bool _showArchived;
+    private int _activeCount;
+    private bool _drawerOpen;
+    private CatalogueItemRow? _drawerItem;
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        var result = await Sender.Send(new GetCatalogueQuery(_search, _showArchived));
+        if (result.IsFailure)
+        {
+            _loadError = result.Error.Message;
+            return;
+        }
+
+        _loadError = null;
+        _items = result.Value;
+        _activeCount = _items.Count(i => !i.IsArchived);
+    }
+
+    private async Task OnSearchAsync(string? value)
+    {
+        _search = value;
+        await LoadAsync();
+    }
+
+    private async Task OnShowArchivedAsync(bool value)
+    {
+        _showArchived = value;
+        await LoadAsync();
+    }
+
+    private void Edit(CatalogueItemRow? item)
+    {
+        _drawerItem = item;
+        _drawerOpen = true;
+    }
+
+    private async Task OnDrawerClosedAsync(Guid? savedId)
+    {
+        var wasNew = _drawerItem is null;
+        _drawerOpen = false;
+        _drawerItem = null;
+        if (savedId is not null)
+        {
+            Snackbar.Add(wasNew ? "Item added." : "Item updated.", Severity.Success);
+            await LoadAsync();
+        }
+    }
+
+    private async Task SetArchivedAsync(CatalogueItemRow item, bool archive)
+    {
+        if (archive)
+        {
+            var confirmed = await Dialogs.ShowMessageBoxAsync(
+                $"Archive {item.Name}?",
+                "It's used on documents, so it can't be deleted. Archived items can't be added to new documents; existing documents keep their lines.",
+                yesText: "Archive",
+                cancelText: "Cancel");
+            if (confirmed != true)
+            {
+                return;
+            }
+        }
+
+        var result = await Sender.Send(new ArchiveCatalogueItemCommand(item.Id, archive));
+        if (result.IsFailure)
+        {
+            Snackbar.Add(result.Error.Message, Severity.Error);
+            return;
+        }
+
+        Snackbar.Add(archive ? "Item archived." : "Item restored.", Severity.Success);
+        await LoadAsync();
+    }
+
+    private async Task DeleteAsync(CatalogueItemRow item)
+    {
+        var confirmed = await Dialogs.ShowMessageBoxAsync(
+            $"Delete {item.Name}?",
+            "It isn't used on any document, so it will be removed for good.",
+            yesText: "Delete",
+            cancelText: "Cancel");
+        if (confirmed != true)
+        {
+            return;
+        }
+
+        var result = await Sender.Send(new DeleteCatalogueItemCommand(item.Id));
+        if (result.IsFailure)
+        {
+            Snackbar.Add(result.Error.Message, Severity.Error);
+            await LoadAsync();
+            return;
+        }
+
+        Snackbar.Add("Item deleted.", Severity.Success);
+        await LoadAsync();
+    }
+}

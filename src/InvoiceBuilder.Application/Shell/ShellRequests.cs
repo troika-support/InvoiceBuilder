@@ -1,0 +1,96 @@
+using InvoiceBuilder.Application.Abstractions;
+using InvoiceBuilder.Domain.Common;
+using MediatR;
+
+namespace InvoiceBuilder.Application.Shell;
+
+public sealed record ShellBusiness(Guid Id, string Name);
+
+public sealed record ShellInfo(IReadOnlyList<ShellBusiness> Businesses, Guid? SelectedBusinessId, bool? DarkMode);
+
+/// <summary>Businesses the signed-in user may switch to (R2). Owners see every business in the tenant.</summary>
+public sealed record GetShellQuery(bool IsOwner) : IRequest<Result<ShellInfo>>;
+
+public sealed class GetShellHandler(IBusinessRepository businesses, IUserPreferenceStore preferences, ICurrentUser user, ICurrentBusiness currentBusiness)
+    : IRequestHandler<GetShellQuery, Result<ShellInfo>>
+{
+    public async Task<Result<ShellInfo>> Handle(GetShellQuery request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (user.UserId is not { } userId)
+        {
+            return Result.Failure<ShellInfo>(ShellErrors.NotSignedIn);
+        }
+
+        var all = await businesses.ListAsync(cancellationToken);
+        IEnumerable<Domain.Businesses.Business> visible = all;
+        if (!request.IsOwner)
+        {
+            var assigned = (await preferences.AssignedBusinessIdsAsync(userId, cancellationToken)).ToHashSet();
+            visible = all.Where(b => assigned.Contains(b.Id));
+        }
+
+        var list = visible.OrderBy(b => b.TradingName, StringComparer.CurrentCultureIgnoreCase)
+            .Select(b => new ShellBusiness(b.Id, b.TradingName))
+            .ToList();
+        var prefs = await preferences.GetAsync(userId, cancellationToken);
+        // Show the business the data is actually scoped to, so the switcher and the lists never disagree.
+        var selected = list.Any(b => b.Id == currentBusiness.BusinessId) ? currentBusiness.BusinessId
+            : list.Any(b => b.Id == prefs.SelectedBusinessId) ? prefs.SelectedBusinessId
+            : list.FirstOrDefault()?.Id;
+        return Result.Success(new ShellInfo(list, selected, prefs.DarkMode));
+    }
+}
+
+/// <summary>Changes the business the user works in (R2). Staff may only pick an assigned business.</summary>
+public sealed record SelectBusinessCommand(Guid BusinessId, bool IsOwner) : IRequest<Result>;
+
+public sealed class SelectBusinessHandler(IBusinessRepository businesses, IUserPreferenceStore preferences, ICurrentUser user)
+    : IRequestHandler<SelectBusinessCommand, Result>
+{
+    public async Task<Result> Handle(SelectBusinessCommand request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (user.UserId is not { } userId)
+        {
+            return Result.Failure(ShellErrors.NotSignedIn);
+        }
+
+        if (await businesses.GetByIdAsync(request.BusinessId, cancellationToken) is null)
+        {
+            return Result.Failure(ShellErrors.NoAccess);
+        }
+
+        if (!request.IsOwner && !(await preferences.AssignedBusinessIdsAsync(userId, cancellationToken)).Contains(request.BusinessId))
+        {
+            return Result.Failure(ShellErrors.NoAccess);
+        }
+
+        await preferences.SetSelectedBusinessAsync(userId, request.BusinessId, cancellationToken);
+        return Result.Success();
+    }
+}
+
+/// <summary>Stores the dark-mode choice per user; null follows the OS.</summary>
+public sealed record SetDarkModeCommand(bool? DarkMode) : IRequest<Result>;
+
+public sealed class SetDarkModeHandler(IUserPreferenceStore preferences, ICurrentUser user) : IRequestHandler<SetDarkModeCommand, Result>
+{
+    public async Task<Result> Handle(SetDarkModeCommand request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (user.UserId is not { } userId)
+        {
+            return Result.Failure(ShellErrors.NotSignedIn);
+        }
+
+        await preferences.SetDarkModeAsync(userId, request.DarkMode, cancellationToken);
+        return Result.Success();
+    }
+}
+
+public static class ShellErrors
+{
+    public static readonly Error NotSignedIn = new("Shell.NotSignedIn", "Sign in to continue.");
+    public static readonly Error NoAccess = new("Shell.NoAccess", "You don't have access to this business.");
+}

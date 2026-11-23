@@ -1,0 +1,183 @@
+using System.Globalization;
+using System.Threading.RateLimiting;
+using Hangfire;
+using InvoiceBuilder.Application;
+using InvoiceBuilder.Application.Options;
+using InvoiceBuilder.Application.Templates;
+using InvoiceBuilder.Infrastructure.Rendering;
+using InvoiceBuilder.Infrastructure;
+using InvoiceBuilder.Infrastructure.Persistence;
+using InvoiceBuilder.Web.Components;
+using InvoiceBuilder.Web.Security;
+using Microsoft.EntityFrameworkCore;
+using MudBlazor.Services;
+using Serilog;
+
+Log.Logger = new LoggerConfiguration()
+	.WriteTo.Console(formatProvider: CultureInfo.InvariantCulture)
+	.CreateBootstrapLogger();
+
+try
+{
+	var builder = WebApplication.CreateBuilder(args);
+
+	builder.Host.UseSerilog((context, services, configuration) => configuration
+		.ReadFrom.Configuration(context.Configuration)
+		.ReadFrom.Services(services)
+		.Enrich.FromLogContext()
+		.WriteTo.Console(formatProvider: CultureInfo.InvariantCulture));
+
+	builder.Services.AddApplication();
+	builder.Services.AddOptions<AppOptions>().BindConfiguration(AppOptions.SectionName)
+		.ValidateDataAnnotations()
+		.Validate(o => builder.Environment.IsDevelopment() || !string.IsNullOrWhiteSpace(o.PublicBaseUrl), "App:PublicBaseUrl is required outside Development.")
+		.ValidateOnStart();
+	builder.Services.AddOptions<StorageOptions>().BindConfiguration(StorageOptions.SectionName)
+		.ValidateDataAnnotations().ValidateOnStart();
+	builder.Services.AddOptions<PaymentOptions>().BindConfiguration(PaymentOptions.SectionName)
+		.Validate(o => !o.UseFake || builder.Environment.IsDevelopment(), "Payments:UseFake may only be true in Development.")
+		.ValidateOnStart();
+	builder.Services.AddOptions<PdfOptions>().BindConfiguration(PdfOptions.SectionName)
+		.ValidateDataAnnotations().ValidateOnStart();
+	builder.Services.AddOptions<EmailOptions>().BindConfiguration(EmailOptions.SectionName)
+		.ValidateDataAnnotations()
+		.Validate(o => !string.Equals(o.Provider, "SendGrid", StringComparison.OrdinalIgnoreCase) || (!string.IsNullOrWhiteSpace(o.ApiKey) && !string.IsNullOrWhiteSpace(o.From)), "Email:ApiKey and Email:From are required for the SendGrid provider.")
+		.ValidateOnStart();
+	builder.Services.AddOptions<WhatsAppOptions>().BindConfiguration(WhatsAppOptions.SectionName)
+		.ValidateDataAnnotations()
+		.Validate(o => !string.Equals(o.Provider, "Cloud", StringComparison.OrdinalIgnoreCase) || (!string.IsNullOrWhiteSpace(o.AppSecret) && !string.IsNullOrWhiteSpace(o.VerifyToken)), "WhatsApp:AppSecret and VerifyToken are required for the Cloud provider.")
+		.ValidateOnStart();
+	builder.Services.AddAppIdentity(builder.Environment);
+	builder.Services.AddInfrastructure(builder.Configuration);
+	builder.Services.AddHangfire(config => config
+		.SetDataCompatibilityLevel(Hangfire.CompatibilityLevel.Version_180)
+		.UseSimpleAssemblyNameTypeSerializer()
+		.UseRecommendedSerializerSettings()
+		.UseSqlServerStorage(builder.Configuration.GetConnectionString(InvoiceBuilder.Infrastructure.DependencyInjection.ConnectionStringName)));
+	builder.Services.AddHangfireServer(options => options.Queues = ["pdf", "default"]);
+
+	builder.Services.AddRazorComponents()
+		.AddInteractiveServerComponents();
+	builder.Services.AddScoped<InvoiceBuilder.Web.Services.ShellState>();
+	builder.Services.AddScoped<InvoiceBuilder.Web.Services.LiveAnnouncer>();
+	builder.Services.AddControllers();
+	builder.Services.AddRazorPages();
+	builder.Services.AddMudServices(options =>
+	{
+		options.SnackbarConfiguration.PositionClass = MudBlazor.Defaults.Classes.Position.BottomLeft;
+		options.SnackbarConfiguration.VisibleStateDuration = 4000;
+		options.SnackbarConfiguration.PreventDuplicates = false;
+	});
+	builder.Services.AddRateLimiter(options =>
+	{
+		options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+		options.AddPolicy(InvoiceBuilder.Web.Controllers.ClientLinkController.RateLimitPolicy, httpContext => RateLimitPartition.GetFixedWindowLimiter(httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ => new FixedWindowRateLimiterOptions { PermitLimit = 30, Window = TimeSpan.FromMinutes(1) }));
+		options.AddPolicy(InvoiceBuilder.Web.Controllers.PaynowWebhookController.RateLimitPolicy, httpContext =>
+			RateLimitPartition.GetFixedWindowLimiter(
+				httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+				_ => new FixedWindowRateLimiterOptions { PermitLimit = 60, Window = TimeSpan.FromMinutes(1) }));
+		options.AddPolicy(InvoiceBuilder.Web.Controllers.WhatsAppWebhookController.RateLimitPolicy, httpContext =>
+			RateLimitPartition.GetFixedWindowLimiter(
+				httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+				_ => new FixedWindowRateLimiterOptions { PermitLimit = 120, Window = TimeSpan.FromMinutes(1) }));
+	});
+
+	var app = builder.Build();
+
+	if (SeedOwnerCommand.Matches(args))
+	{
+		return await SeedOwnerCommand.RunAsync(app.Services, args);
+	}
+
+	if (app.Environment.IsDevelopment())
+	{
+		await using var scope = app.Services.CreateAsyncScope();
+		var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+		await db.Database.MigrateAsync();
+		await scope.ServiceProvider.GetRequiredService<DevDataSeeder>().SeedAsync();
+	}
+
+	if (!app.Environment.IsDevelopment())
+	{
+		app.UseExceptionHandler("/Error", createScopeForErrors: true);
+		app.UseHsts();
+	}
+
+	app.UseSerilogRequestLogging();
+	app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
+	app.UseHttpsRedirection();
+	app.UseRateLimiter();
+
+	app.UseAuthentication();
+	app.UseAuthorization();
+	app.Use(async (context, next) =>
+	{
+		if (TwoFactorGate.MustEnrol(context.User) && !TwoFactorGate.IsAllowedWhileEnrolling(context.Request.Path.Value ?? "/"))
+		{
+			context.Response.Redirect(TwoFactorGate.SetupPath);
+			return;
+		}
+
+		await next();
+	});
+	app.UseAntiforgery();
+
+	app.MapStaticAssets();
+	app.MapControllers();
+	app.MapHangfireDashboard("/admin/jobs", new DashboardOptions
+	{
+		Authorization = [],
+		IsReadOnlyFunc = _ => true,
+		DashboardTitle = "Invoice Builder jobs",
+	}).RequireAuthorization(InvoiceBuilder.Web.Security.Policies.Owner);
+	app.MapRazorPages();
+	if (app.Environment.IsDevelopment())
+	{
+		app.MapGet("/dev/render-sample", async (int? lines, ITemplateRenderer renderer, IPdfRenderer pdf, CancellationToken ct) =>
+		{
+			var model = StudioBoldSample.Model(Math.Clamp(lines ?? 60, 1, 500));
+			var html = await renderer.RenderHtmlAsync(StudioBoldSample.WithFooter(), model, ct);
+			return Results.File(await pdf.RenderAsync(html, ct), "application/pdf");
+		});
+	}
+	app.MapRazorComponents<App>()
+		.AddInteractiveServerRenderMode();
+
+	app.Services.GetRequiredService<Hangfire.IRecurringJobManager>().AddOrUpdate<InvoiceBuilder.Infrastructure.Services.RemindersJob>(
+		"reminders",
+		j => j.RunAsync(CancellationToken.None),
+		"0 8 * * *",
+		new Hangfire.RecurringJobOptions { TimeZone = TimeZoneInfo.FindSystemTimeZoneById("Africa/Harare") });
+
+	app.Services.GetRequiredService<Hangfire.IRecurringJobManager>().AddOrUpdate<InvoiceBuilder.Infrastructure.Services.RecurringInvoicesJob>(
+		"recurring-invoices",
+		j => j.RunAsync(CancellationToken.None),
+		"0 6 * * *",
+		new Hangfire.RecurringJobOptions { TimeZone = TimeZoneInfo.FindSystemTimeZoneById("Africa/Harare") });
+
+	app.Services.GetRequiredService<Hangfire.IRecurringJobManager>().AddOrUpdate<InvoiceBuilder.Infrastructure.Services.ExpireQuotesJob>(
+		"expire-quotes",
+		j => j.RunAsync(CancellationToken.None),
+		"15 0 * * *",
+		new Hangfire.RecurringJobOptions { TimeZone = TimeZoneInfo.FindSystemTimeZoneById("Africa/Harare") });
+
+	app.Services.GetRequiredService<Hangfire.IRecurringJobManager>().AddOrUpdate<InvoiceBuilder.Infrastructure.Services.PollPendingPaymentsJob>(
+		"poll-pending-payments",
+		j => j.RunAsync(CancellationToken.None),
+		"*/2 * * * *",
+		new Hangfire.RecurringJobOptions { TimeZone = TimeZoneInfo.FindSystemTimeZoneById("Africa/Harare") });
+
+	app.Run();
+	return 0;
+}
+catch (Exception ex) when (ex is not HostAbortedException)
+{
+	Log.Fatal(ex, "Host terminated unexpectedly");
+	throw;
+}
+finally
+{
+	Log.CloseAndFlush();
+}
+
+public partial class Program;

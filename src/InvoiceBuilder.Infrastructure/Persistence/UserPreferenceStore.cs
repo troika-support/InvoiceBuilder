@@ -1,0 +1,33 @@
+using InvoiceBuilder.Application.Abstractions;
+using Microsoft.EntityFrameworkCore;
+
+namespace InvoiceBuilder.Infrastructure.Persistence;
+
+public sealed class UserPreferenceStore(AppDbContext db) : IUserPreferenceStore
+{
+    public async Task<UserPreferences> GetAsync(string userId, CancellationToken cancellationToken = default)
+    {
+        var row = await db.Users.Where(u => u.Id == userId)
+            .Select(u => new UserPreferences(u.SelectedBusinessId, u.PrefersDarkMode))
+            .SingleOrDefaultAsync(cancellationToken);
+        return row ?? new UserPreferences(null, null);
+    }
+
+    public Task<string?> GetDisplayNameAsync(string userId, CancellationToken cancellationToken = default) =>
+        db.Users.Where(u => u.Id == userId).Select(u => (string?)u.DisplayName).SingleOrDefaultAsync(cancellationToken);
+
+    public Task SetDisplayNameAsync(string userId, string displayName, CancellationToken cancellationToken = default) =>
+        db.Users.Where(u => u.Id == userId)
+            .ExecuteUpdateAsync(s => s.SetProperty(u => u.DisplayName, displayName), cancellationToken);
+
+    public async Task<IReadOnlyList<Guid>> AssignedBusinessIdsAsync(string userId, CancellationToken cancellationToken = default) =>
+        await db.UserBusinesses.Where(u => u.UserId == userId).Select(u => u.BusinessId).ToListAsync(cancellationToken);
+
+    public Task SetSelectedBusinessAsync(string userId, Guid businessId, CancellationToken cancellationToken = default) =>
+        db.Users.Where(u => u.Id == userId)
+            .ExecuteUpdateAsync(s => s.SetProperty(u => u.SelectedBusinessId, businessId), cancellationToken);
+
+    public Task SetDarkModeAsync(string userId, bool? darkMode, CancellationToken cancellationToken = default) =>
+        db.Users.Where(u => u.Id == userId)
+            .ExecuteUpdateAsync(s => s.SetProperty(u => u.PrefersDarkMode, darkMode), cancellationToken);
+}

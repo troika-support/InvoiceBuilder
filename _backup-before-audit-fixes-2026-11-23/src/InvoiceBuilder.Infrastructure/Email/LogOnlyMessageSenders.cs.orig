@@ -1,0 +1,31 @@
+using InvoiceBuilder.Application.Messaging;
+using Microsoft.Extensions.Logging;
+
+namespace InvoiceBuilder.Infrastructure.Email;
+
+/// <summary>Development email sender: logs that a message would be sent, never its body or address (links are secrets).</summary>
+public sealed partial class LogOnlyEmailSender(ILogger<LogOnlyEmailSender> logger) : IRichEmailSender
+{
+    public Task SendAsync(EmailMessage message, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        LogSend(logger, message.Subject, message.Attachment is not null);
+        return Task.CompletedTask;
+    }
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Email (log only): would send \"{Subject}\" (attachment: {HasAttachment})")]
+    private static partial void LogSend(ILogger logger, string subject, bool hasAttachment);
+}
+
+public sealed partial class LogOnlyWhatsAppSender(ILogger<LogOnlyWhatsAppSender> logger) : IWhatsAppSender
+{
+    public Task<InvoiceBuilder.Domain.Common.Result<string>> SendTemplateAsync(WhatsAppTemplateMessage message, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        LogSend(logger, message.TemplateName, message.Parameters.Count);
+        return Task.FromResult(InvoiceBuilder.Domain.Common.Result.Success($"log-{Guid.NewGuid():N}"));
+    }
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "WhatsApp (log only): would send template {Template} with {ParameterCount} parameters")]
+    private static partial void LogSend(ILogger logger, string template, int parameterCount);
+}

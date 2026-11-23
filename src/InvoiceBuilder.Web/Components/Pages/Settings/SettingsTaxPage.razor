@@ -1,0 +1,260 @@
+@page "/settings/tax"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize(Policy = "Owner")]
+@using InvoiceBuilder.Application.Businesses.Settings
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+@inject TimeProvider Clock
+
+<PageTitle>Tax &amp; currency · Settings · Invoice Builder</PageTitle>
+
+<h1 class="ib-page-title">Business settings</h1>
+<div class="ib-settings">
+    <SettingsNav />
+    <section class="ib-settings__body" aria-labelledby="section-title">
+        <h2 id="section-title" class="ib-section-title">Tax &amp; currency</h2>
+
+        @if (_loadError is not null)
+        {
+            <EmptyState Title="@_loadError" Message="Add a business or pick one in the sidebar." />
+        }
+        else if (_model is null)
+        {
+            <MudProgressLinear Indeterminate="true" aria-label="Loading settings" />
+        }
+        else
+        {
+            @if (_formError is not null)
+            {
+                <MudAlert Severity="Severity.Error" role="alert" Class="mb-4">@_formError</MudAlert>
+            }
+
+            <div class="ib-card" style="padding: 20px;">
+                <h3 class="ib-card__title">Defaults</h3>
+                <div class="ib-form-grid">
+                    <MudSelect T="string" @bind-Value="_model.DefaultCurrency" Label="Default currency" Variant="Variant.Outlined"
+                               Error="@HasError("DefaultCurrency")" ErrorText="@ErrorFor("DefaultCurrency")">
+                        <MudSelectItem T="string" Value="@("USD")">USD</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("ZWG")">ZiG</MudSelectItem>
+                    </MudSelect>
+                    <MudNumericField T="int" @bind-Value="_model.DefaultTermsDays" Label="Payment terms (days)" Min="0" Max="365" Variant="Variant.Outlined"
+                                     HelperText="Invoices are due this many days after issue." Error="@HasError("DefaultTermsDays")" ErrorText="@ErrorFor("DefaultTermsDays")" />
+                    <MudNumericField T="int" @bind-Value="_model.QuoteValidityDays" Label="Quotes valid for (days)" Min="1" Max="365" Variant="Variant.Outlined"
+                                     Error="@HasError("QuoteValidityDays")" ErrorText="@ErrorFor("QuoteValidityDays")" />
+                </div>
+                <MudSwitch T="bool" @bind-Value="_model.AllowPartPayments" Color="Color.Primary" Label="Allow part payments" />
+                @if (_model.AllowPartPayments)
+                {
+                    <div class="ib-form-grid">
+                        <MudNumericField T="decimal" @bind-Value="_model.MinPartPaymentPercent" Label="Minimum part payment (% of balance)" Min="0" Max="100" Variant="Variant.Outlined"
+                                         Error="@HasError("MinPartPaymentPercent")" ErrorText="@ErrorFor("MinPartPaymentPercent")" />
+                    </div>
+                }
+            </div>
+
+            <div class="ib-card" style="padding: 20px; margin-top: 16px;">
+                <h3 class="ib-card__title">Tax rates</h3>
+                @if (_model.Rates.Count == 0)
+                {
+                    <p class="ib-help" style="margin-top: 0;">No tax (not VAT-registered). Add a rate if you charge VAT.</p>
+                }
+                else
+                {
+                    <table class="ib-table">
+                        <thead>
+                            <tr>
+                                <th scope="col">Name</th>
+                                <th scope="col">Rate</th>
+                                <th scope="col">Effective from</th>
+                                <th scope="col">Fiscal tax ID</th>
+                                <th scope="col"><span class="ib-visually-hidden">Actions</span></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var rate in _model.Rates)
+                            {
+                                <tr>
+                                    <th scope="row">@rate.Name</th>
+                                    <td class="ib-mono">@rate.Percent.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)%</td>
+                                    <td>@rate.EffectiveFrom.ToString("d MMM yyyy", System.Globalization.CultureInfo.InvariantCulture)</td>
+                                    <td>@(rate.FiscalTaxId ?? "—")</td>
+                                    <td>
+                                        <MudButton Variant="Variant.Text" OnClick="() => RemoveRate(rate)" aria-label="@($"Remove {rate.Name}")">Remove</MudButton>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                }
+
+                <h4 class="ib-card__title" style="margin-top: 16px;">Add a tax rate</h4>
+                <div class="ib-form-grid">
+                    <MudTextField @bind-Value="_newRate.Name" Label="Name" Variant="Variant.Outlined" Placeholder="VAT" Error="@(_newRateError is not null)" ErrorText="@_newRateError" />
+                    <MudNumericField T="decimal" @bind-Value="_newRate.Percent" Label="Rate (%)" Min="0" Max="100" Variant="Variant.Outlined" />
+                    <MudDatePicker Date="_newRate.EffectiveFrom" DateChanged="d => _newRate.EffectiveFrom = d" Label="Effective from" Variant="Variant.Outlined" DateFormat="d MMM yyyy" />
+                    <MudTextField @bind-Value="_newRate.FiscalTaxId" Label="Fiscal tax ID (optional)" Variant="Variant.Outlined" />
+                </div>
+                <MudButton Variant="Variant.Outlined" Color="Color.Primary" OnClick="AddRate">Add rate</MudButton>
+            </div>
+
+            <div class="ib-settings__footer" style="margin-top: 16px;">
+                <MudButton Variant="Variant.Text" OnClick="DiscardAsync" Disabled="_saving">Discard</MudButton>
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveAsync" Disabled="_saving">Save changes</MudButton>
+            </div>
+        }
+    </section>
+</div>
+
+@code {
+    private TaxModel? _model;
+    private NewRateModel _newRate = new();
+    private string? _loadError;
+    private string? _formError;
+    private string? _newRateError;
+    private bool _saving;
+    private IReadOnlyDictionary<string, string[]> _fieldErrors = new Dictionary<string, string[]>();
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        var result = await Sender.Send(new GetTaxAndCurrencyQuery());
+        if (result.IsFailure)
+        {
+            _loadError = "No business selected";
+            _model = null;
+            return;
+        }
+
+        _loadError = null;
+        _model = TaxModel.From(result.Value);
+        _newRate = NewRate();
+    }
+
+    private NewRateModel NewRate() => new() { EffectiveFrom = Clock.GetUtcNow().Date };
+
+    private void AddRate()
+    {
+        if (string.IsNullOrWhiteSpace(_newRate.Name))
+        {
+            _newRateError = "Enter a name for the tax rate.";
+            return;
+        }
+
+        if (_newRate.Percent is < 0m or > 100m)
+        {
+            _newRateError = "Enter a percentage from 0 to 100.";
+            return;
+        }
+
+        _newRateError = null;
+        _model!.Rates.Add(new RateModel
+        {
+            Name = _newRate.Name.Trim(),
+            Percent = _newRate.Percent,
+            EffectiveFrom = DateOnly.FromDateTime(_newRate.EffectiveFrom ?? Clock.GetUtcNow().Date),
+            FiscalTaxId = string.IsNullOrWhiteSpace(_newRate.FiscalTaxId) ? null : _newRate.FiscalTaxId.Trim(),
+        });
+        Announcer.Announce($"{_newRate.Name} added. Save changes to keep it.");
+        _newRate = NewRate();
+    }
+
+    private void RemoveRate(RateModel rate)
+    {
+        _model!.Rates.Remove(rate);
+        if (rate.Id is { } id)
+        {
+            _model.Archived.Add(id);
+        }
+
+        Announcer.Announce($"{rate.Name} removed. Save changes to keep this.");
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_model is null)
+        {
+            return;
+        }
+
+        _saving = true;
+        _formError = null;
+        _fieldErrors = new Dictionary<string, string[]>();
+        try
+        {
+            var result = await Sender.Send(new UpdateTaxAndCurrencyCommand(
+                _model.DefaultCurrency,
+                _model.DefaultTermsDays,
+                _model.QuoteValidityDays,
+                _model.AllowPartPayments,
+                _model.MinPartPaymentPercent,
+                _model.Rates.Where(r => r.Id is null).Select(r => new NewTaxRate(r.Name, r.Percent, r.EffectiveFrom, r.FiscalTaxId)).ToList(),
+                _model.Archived.ToList()));
+
+            if (result.IsFailure)
+            {
+                _fieldErrors = result.Error.FieldErrors ?? new Dictionary<string, string[]>();
+                _formError = result.Error.Message;
+                Announcer.Announce(result.Error.Message);
+                return;
+            }
+
+            Announcer.Toast("Settings saved", Severity.Success);
+            await LoadAsync();
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task DiscardAsync()
+    {
+        _formError = null;
+        _newRateError = null;
+        _fieldErrors = new Dictionary<string, string[]>();
+        await LoadAsync();
+        Announcer.Announce("Changes discarded");
+    }
+
+    private bool HasError(string field) => _fieldErrors.ContainsKey(field);
+
+    private string? ErrorFor(string field) => _fieldErrors.TryGetValue(field, out var messages) ? string.Join(" ", messages) : null;
+
+    private sealed class TaxModel
+    {
+        public string DefaultCurrency { get; set; } = "USD";
+        public int DefaultTermsDays { get; set; }
+        public int QuoteValidityDays { get; set; }
+        public bool AllowPartPayments { get; set; }
+        public decimal MinPartPaymentPercent { get; set; }
+        public List<RateModel> Rates { get; init; } = [];
+        public HashSet<Guid> Archived { get; } = [];
+
+        public static TaxModel From(TaxAndCurrency t) => new()
+        {
+            DefaultCurrency = t.DefaultCurrency,
+            DefaultTermsDays = t.DefaultTermsDays,
+            QuoteValidityDays = t.QuoteValidityDays,
+            AllowPartPayments = t.AllowPartPayments,
+            MinPartPaymentPercent = t.MinPartPaymentPercent,
+            Rates = t.TaxRates.Select(r => new RateModel { Id = r.Id, Name = r.Name, Percent = r.Percent, EffectiveFrom = r.EffectiveFrom, FiscalTaxId = r.FiscalTaxId }).ToList(),
+        };
+    }
+
+    private sealed class RateModel
+    {
+        public Guid? Id { get; init; }
+        public string Name { get; init; } = "";
+        public decimal Percent { get; init; }
+        public DateOnly EffectiveFrom { get; init; }
+        public string? FiscalTaxId { get; init; }
+    }
+
+    private sealed class NewRateModel
+    {
+        public string Name { get; set; } = "";
+        public decimal Percent { get; set; }
+        public DateTime? EffectiveFrom { get; set; }
+        public string? FiscalTaxId { get; set; }
+    }
+}

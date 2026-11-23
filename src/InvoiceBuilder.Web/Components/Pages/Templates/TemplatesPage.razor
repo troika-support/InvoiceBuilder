@@ -1,0 +1,191 @@
+@page "/templates"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize(Policy = "Owner")]
+@using InvoiceBuilder.Application.Templates
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Application.Templates.IBuiltInTemplates BuiltIns
+@inject NavigationManager Navigation
+@inject ISnackbar Snackbar
+@inject IDialogService Dialogs
+
+<PageTitle>Templates · Invoice Builder</PageTitle>
+
+<h1 class="ib-page-title">Templates</h1>
+
+<MudTabs @bind-ActivePanelIndex="_tab" Elevation="0" Rounded="true">
+    <MudTabPanel Text="Templates">
+        @if (_themes is not null && _themes.Count == 0)
+        {
+            <p class="ib-help" role="status">Templates need a theme for their colours and fonts. <MudLink OnClick="GoToTheme">Create a theme first</MudLink>.</p>
+        }
+        else
+        {
+            <div class="ib-designer__grid" style="max-width:720px;margin-bottom:12px;">
+                <MudTextField T="string" @bind-Value="_newName" Label="New template name" Variant="Variant.Outlined" Margin="Margin.Dense" Immediate="true" />
+                <MudSelect T="string" @bind-Value="_newBuiltIn" Label="Start from" Variant="Variant.Outlined" Margin="Margin.Dense">
+                    <MudSelectItem T="string" Value="@string.Empty">Blank</MudSelectItem>
+                    @foreach (var b in BuiltIns.Names)
+                    {
+                        <MudSelectItem T="string" Value="@b">@b</MudSelectItem>
+                    }
+                </MudSelect>
+                <MudSelect T="Guid?" @bind-Value="_newThemeId" Label="Theme" Variant="Variant.Outlined" Margin="Margin.Dense">
+                    <MudSelectItem T="Guid?" Value="@((Guid?)null)">Business default</MudSelectItem>
+                    @foreach (var th in (_themes ?? []).Where(x => !x.IsArchived))
+                    {
+                        <MudSelectItem T="Guid?" Value="@((Guid?)th.Id)">@th.Name</MudSelectItem>
+                    }
+                </MudSelect>
+            </div>
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="CreateAsync" Disabled="@(string.IsNullOrWhiteSpace(_newName) || _creating)">New template</MudButton>
+        }
+
+        @if (_themeFilter is { } filterId)
+        {
+            <p class="ib-help" style="margin-top:12px;">Showing templates that use <strong>@ThemeName(filterId)</strong>. <MudLink OnClick="@(() => _themeFilter = null)">Show all</MudLink></p>
+        }
+
+        <MudSwitch T="bool" @bind-Value="_showArchived" Label="Show archived" Color="Color.Primary" />
+
+        @if (_items is null)
+        {
+            <p class="ib-help" role="status">Loading templates…</p>
+        }
+        else if (Visible().Count == 0)
+        {
+            <EmptyState Title="No templates yet" Message="Templates will appear here once created." />
+        }
+        else
+        {
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;margin-top:12px;" aria-label="Templates">
+                @foreach (var t in Visible())
+                {
+                    var tpl = t;
+                    var theme = _themes?.FirstOrDefault(x => x.Id == tpl.ThemeId);
+                    <MudPaper Outlined="true" Class="pa-3">
+                        <strong>@tpl.Name</strong>@(tpl.IsArchived ? " (archived)" : "")
+                        <div class="ib-help">@(tpl.PublishedVersion is { } p ? $"v{p} live" : "Not published")@(tpl.DraftVersion is { } d ? $" · draft v{d}" : "") · Used by @tpl.UsedBy @(tpl.UsedBy == 1 ? "document" : "documents")@(tpl.DefaultFor.Count > 0 ? $" · Default for {string.Join(", ", tpl.DefaultFor)}" : "")</div>
+                        <div style="margin:8px 0;">
+                            @if (theme is not null)
+                            {
+                                <MudChip T="string" Size="Size.Small" OnClick="GoToTheme">
+                                    @foreach (var key in new[] { "ink", "accent", "paper" })
+                                    {
+                                        <span style="display:inline-block;width:12px;height:12px;border-radius:50%;border:1px solid #888;margin-right:3px;background:@theme.Tokens.GetValueOrDefault(key, "#CCCCCC");" aria-hidden="true"></span>
+                                    }
+                                    Theme: @theme.Name
+                                </MudChip>
+                            }
+                        </div>
+                        @if (tpl.PublishedVersion is not null && !tpl.IsArchived)
+                        {
+                            @foreach (var type in tpl.Types.Where(x => !tpl.DefaultFor.Contains(x)))
+                            {
+                                <MudButton Variant="Variant.Text" OnClick="() => SetDefaultAsync(tpl.Id, type)" aria-label="@($"Set {tpl.Name} as default for {type}")">Set as default for @type</MudButton>
+                            }
+                        }
+                        @if (!tpl.IsArchived)
+                        {
+                            <MudButton Variant="Variant.Outlined" Href="@($"/templates/{tpl.Id}/design")">Open designer</MudButton>
+                            <MudButton Variant="Variant.Text" OnClick="() => ArchiveAsync(tpl)" aria-label="@($"Archive template {tpl.Name}")">Archive</MudButton>
+                        }
+                        else
+                        {
+                            <MudButton Variant="Variant.Outlined" OnClick="() => RestoreAsync(tpl)" aria-label="@($"Restore template {tpl.Name}")">Restore</MudButton>
+                        }
+                    </MudPaper>
+                }
+            </div>
+        }
+    </MudTabPanel>
+    <MudTabPanel Text="Themes">
+        <ThemesTab Themes="_themes" OnChanged="ReloadAsync" OnViewTemplates="ViewTemplates" />
+    </MudTabPanel>
+</MudTabs>
+
+@code {
+    private IReadOnlyList<TemplateListItem>? _items;
+    private IReadOnlyList<ThemeItem>? _themes;
+    private string _newName = string.Empty;
+    private string _newBuiltIn = string.Empty;
+    private Guid? _newThemeId;
+    private Guid? _themeFilter;
+    private int _tab;
+    private bool _creating;
+    private bool _showArchived;
+
+    protected override async Task OnInitializedAsync() => await ReloadAsync();
+
+    private List<TemplateListItem> Visible() =>
+        (_items ?? []).Where(t => (_showArchived || !t.IsArchived) && (_themeFilter is null || t.ThemeId == _themeFilter)).ToList();
+
+    private async Task ArchiveAsync(TemplateListItem tpl)
+    {
+        var confirmed = await Dialogs.ShowMessageBoxAsync(
+            $"Archive {tpl.Name}?",
+            "It will be hidden from lists and pickers. Issued documents keep their template version.",
+            yesText: "Archive",
+            cancelText: "Cancel");
+        if (confirmed != true)
+        {
+            return;
+        }
+
+        await SendArchiveAsync(new ArchiveTemplateCommand(tpl.Id), "Template archived.");
+    }
+
+    private Task RestoreAsync(TemplateListItem tpl) => SendArchiveAsync(new ArchiveTemplateCommand(tpl.Id, false), "Template restored.");
+
+    private async Task SendArchiveAsync(ArchiveTemplateCommand command, string message)
+    {
+        var result = await Sender.Send(command);
+        if (result.IsFailure)
+        {
+            Snackbar.Add(result.Error.Message, Severity.Warning);
+            return;
+        }
+
+        Snackbar.Add(message, Severity.Success);
+        await ReloadAsync();
+    }
+
+    private string ThemeName(Guid id) => _themes?.FirstOrDefault(t => t.Id == id)?.Name ?? "theme";
+
+    private void GoToTheme() => _tab = 1;
+
+    private void ViewTemplates(Guid themeId)
+    {
+        _themeFilter = themeId;
+        _tab = 0;
+    }
+
+    private async Task CreateAsync()
+    {
+        _creating = true;
+        var result = await Sender.Send(new CreateTemplateCommand(_newName.Trim(), string.IsNullOrEmpty(_newBuiltIn) ? null : _newBuiltIn, _newThemeId));
+        _creating = false;
+        if (result.IsFailure)
+        {
+            Snackbar.Add(result.Error.Message, Severity.Error);
+            return;
+        }
+
+        Navigation.NavigateTo($"/templates/{result.Value}/design");
+    }
+
+    private async Task ReloadAsync()
+    {
+        var themes = await Sender.Send(new ListThemesQuery(true));
+        _themes = themes.IsSuccess ? themes.Value : [];
+        var result = await Sender.Send(new ListTemplatesQuery(true));
+        _items = result.IsSuccess ? result.Value : [];
+    }
+
+    private async Task SetDefaultAsync(Guid id, InvoiceBuilder.Domain.Documents.DocumentType type)
+    {
+        var result = await Sender.Send(new SetDefaultTemplateCommand(id, type));
+        if (result.IsSuccess)
+        {
+            await ReloadAsync();
+        }
+    }
+}

@@ -1,0 +1,100 @@
+@using InvoiceBuilder.Application.Payments
+@using InvoiceBuilder.Domain.Documents
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Application.Abstractions.IDisplayFormatter Format
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+
+<MudDialog aria-labelledby="reschedule-title">
+    <TitleContent>
+        <h2 id="reschedule-title" class="ib-section-title">Reschedule instalments</h2>
+    </TitleContent>
+    <DialogContent>
+        @if (_formError is not null)
+        {
+            <MudAlert Severity="Severity.Error" role="alert" Class="mb-4">@_formError</MudAlert>
+        }
+        <p class="ib-help">Only dates can change, and only for instalments with nothing paid. Amounts stay as they are.</p>
+        @for (var i = 0; i < _rows.Count; i++)
+        {
+            var index = i;
+            var row = _rows[index];
+            <div style="display: flex; gap: 12px; align-items: center; min-height: 56px;">
+                <span style="min-width: 7rem;">Instalment @(index + 1) · @Format.Money(row.Amount, Currency)</span>
+                @if (row.DueKind == InstalmentDueKind.Date)
+                {
+                    <MudDatePicker @bind-Date="row.Due" Label="@($"Due date {index + 1}")" Variant="Variant.Outlined" />
+                }
+                else
+                {
+                    <span>@(row.DueKind == InstalmentDueKind.OnAcceptance ? "On acceptance" : "On issue")</span>
+                }
+            </div>
+        }
+        <MudTextField @bind-Value="_reason" Label="Reason" Required="true" Lines="2" Variant="Variant.Outlined" Class="mt-3" HelperText="Required. Kept in the activity log." />
+        <MudCheckBox T="bool" @bind-Value="_notify" Color="Color.Primary" Label="Tell the client about the new dates" />
+    </DialogContent>
+    <DialogActions>
+        <MudButton Variant="Variant.Text" OnClick="Cancel" Disabled="_saving">Cancel</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveAsync" Disabled="_saving">Reschedule</MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] private IMudDialogInstance Dialog { get; set; } = default!;
+
+    [Parameter] public Guid InvoiceId { get; set; }
+
+    [Parameter] public string Currency { get; set; } = "USD";
+
+    [Parameter] public IReadOnlyList<InstalmentDraft> Current { get; set; } = [];
+
+    private readonly List<Row> _rows = [];
+    private string _reason = string.Empty;
+    private bool _notify;
+    private string? _formError;
+    private bool _saving;
+
+    protected override void OnInitialized()
+    {
+        foreach (var i in Current)
+        {
+            _rows.Add(new Row { DueKind = i.DueKind, Due = i.DueDate?.ToDateTime(TimeOnly.MinValue), Amount = i.Amount, Note = i.Note });
+        }
+    }
+
+    private void Cancel() => Dialog.Cancel();
+
+    private async Task SaveAsync()
+    {
+        _saving = true;
+        _formError = null;
+        try
+        {
+            var proposed = _rows.Select(r => new InstalmentDraft(r.DueKind, r.Due is { } d ? DateOnly.FromDateTime(d) : null, r.Amount, r.Note)).ToList();
+            var result = await Sender.Send(new RescheduleInstalmentsCommand(InvoiceId, proposed, _reason));
+            if (result.IsFailure)
+            {
+                _formError = result.Error.Message;
+                Announcer.Announce(result.Error.Message);
+                return;
+            }
+
+            Dialog.Close(DialogResult.Ok(_notify));
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private sealed class Row
+    {
+        public InstalmentDueKind DueKind { get; set; }
+
+        public DateTime? Due { get; set; }
+
+        public decimal Amount { get; set; }
+
+        public string? Note { get; set; }
+    }
+}

@@ -1,0 +1,300 @@
+using System.Text.Json;
+using InvoiceBuilder.Application.Abstractions;
+using InvoiceBuilder.Application.Templates;
+using InvoiceBuilder.Domain.Common;
+using InvoiceBuilder.Domain.Documents;
+using MediatR;
+
+namespace InvoiceBuilder.Application.Documents;
+
+/// <summary>Builds the render model and runs the single renderer (R25) for preview, client view and PDF.</summary>
+public interface IDocumentHtmlService
+{
+    Task<Result<string>> RenderAsync(Document document, Guid templateVersionId, string? clientLinkUrl, CancellationToken cancellationToken = default);
+}
+
+public sealed class DocumentHtmlService(
+    IBusinessRepository businesses,
+    IClientRepository clients,
+    ITemplateRepository templates,
+    IPaymentRepository payments,
+    IBusinessSettingsRepository settings,
+    ITemplateRenderer renderer,
+    TimeProvider time) : IDocumentHtmlService
+{
+    public async Task<Result<string>> RenderAsync(Document document, Guid templateVersionId, string? clientLinkUrl, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+
+        var version = await templates.GetVersionAsync(templateVersionId, cancellationToken);
+        if (version is null)
+        {
+            return Result.Failure<string>(IssueDocumentErrors.TemplateNotFound);
+        }
+
+        var parsed = TemplateDefinitionJson.Parse(version.Definition);
+        if (parsed.IsFailure)
+        {
+            return Result.Failure<string>(parsed.Error);
+        }
+
+        var template = await templates.GetByIdAsync(version.TemplateId, cancellationToken);
+        var theme = template is null ? null : await templates.GetThemeAsync(template.ThemeId, cancellationToken);
+        var business = await businesses.GetByIdAsync(document.BusinessId, cancellationToken);
+        if (business is null)
+        {
+            return Result.Failure<string>(DraftDocumentErrors.NoBusiness);
+        }
+
+        var businessModel = new BusinessRenderModel(
+            business.TradingName, business.RegisteredName, business.Email, business.WhatsAppNumber, business.Address, LogoUri(business.Logo, business.LogoContentType))
+        {
+            BankDetails = (await settings.GetAsync(document.BusinessId, cancellationToken))?.BankDetails,
+        };
+        var clientModel = ClientModel(document, await clients.GetByIdAsync(document.ClientId, cancellationToken), businessModel, out var issuedBusiness);
+        if (issuedBusiness is not null)
+        {
+            businessModel = issuedBusiness;
+        }
+
+        var paid = document.Number is null || document.Type != DocumentType.Invoice
+            ? 0m
+            : await payments.ConfirmedAllocatedTotalAsync(document.Id, cancellationToken);
+
+        var info = new DocumentRenderInfo(
+            TypeLabel(document.Type),
+            document.Number?.Value ?? "DRAFT",
+            document.IssueDate,
+            document.DueDate,
+            document.ValidUntil,
+            document.Currency.ToString(),
+            document.Subtotal,
+            document.DiscountTotal,
+            document.TaxTotal,
+            document.Total,
+            paid,
+            document.Total - paid,
+            document.Notes,
+            document.Terms,
+            clientLinkUrl)
+        {
+            Status = StatusLabel(document, paid),
+        };
+
+        var lines = document.Lines
+            .OrderBy(l => l.Position)
+            .Select(l => new RenderLine(l.Description, l.Detail, l.Quantity, l.UnitPrice, $"{l.TaxPercentSnapshot:0.##}%", l.LineTotal))
+            .ToList();
+
+        var model = new DocumentRenderModel(businessModel, clientModel, info, lines, ThemeTokens(theme?.Tokens))
+        {
+            Plan = PlanInfo(document, paid, DateOnly.FromDateTime(time.GetUtcNow().UtcDateTime)),
+        };
+        return Result.Success(await renderer.RenderHtmlAsync(parsed.Value, model, cancellationToken));
+    }
+
+    private static string StatusLabel(Document document, decimal paid) =>
+        document.Number is null ? "Draft"
+        : document.Type == DocumentType.Invoice && document.Total > 0 && paid >= document.Total ? "Paid"
+        : document.Status.ToString();
+
+    // VERIFY: credit notes are not yet applied
+    private static PlanRenderInfo? PlanInfo(Document document, decimal paid, DateOnly today)
+    {
+        if (document.Instalments.Count == 0)
+        {
+            return null;
+        }
+
+        var drafts = document.Instalments.OrderBy(i => i.Position).Select(i => i.ToDraft()).ToList();
+        var states = InstalmentStatusCalculator.Calculate(drafts, paid, 0m, today);
+        var next = states.FirstOrDefault(s => s.Remaining > 0m);
+        var rows = states
+            .Select(s => new InstalmentRenderRow(s.Position, s.DueDate, s.Amount, s.Status.ToString(), s.Remaining))
+            .ToList();
+        return new PlanRenderInfo(states.Count, next?.Position, next?.Remaining, next?.DueDate, InstalmentStatusCalculator.OverdueAmount(states))
+        {
+            Rows = rows,
+        };
+    }
+
+    private static ClientRenderModel ClientModel(Document document, InvoiceBuilder.Domain.Clients.Client? live, BusinessRenderModel liveBusiness, out BusinessRenderModel? issuedBusiness)
+    {
+        issuedBusiness = null;
+        if (document.Number is null)
+        {
+            return live is null
+                ? new ClientRenderModel(string.Empty, null, null, null)
+                : new ClientRenderModel(live.Name, live.Email, live.Phone, live.Address);
+        }
+
+        var client = Snapshot(document.ClientSnapshot);
+        var business = Snapshot(document.BusinessSnapshot);
+        if (business.Count > 0)
+        {
+            issuedBusiness = new BusinessRenderModel(
+                business.GetValueOrDefault("tradingName") ?? liveBusiness.TradingName,
+                business.GetValueOrDefault("registeredName") ?? liveBusiness.RegisteredName,
+                business.GetValueOrDefault("email") ?? liveBusiness.Email,
+                business.GetValueOrDefault("whatsApp") ?? liveBusiness.Phone,
+                business.GetValueOrDefault("address") ?? liveBusiness.Address,
+                liveBusiness.LogoDataUri)
+            {
+                BankDetails = liveBusiness.BankDetails,
+            };
+        }
+
+        return new ClientRenderModel(
+            client.GetValueOrDefault("name") ?? string.Empty,
+            client.GetValueOrDefault("email"),
+            client.GetValueOrDefault("phone") ?? client.GetValueOrDefault("whatsApp"),
+            client.GetValueOrDefault("address"));
+    }
+
+    private static Dictionary<string, string?> Snapshot(string json)
+    {
+        var result = new Dictionary<string, string?>(StringComparer.Ordinal);
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var p in doc.RootElement.EnumerateObject().Where(p => p.Value.ValueKind == JsonValueKind.String))
+                {
+                    result[p.Name] = p.Value.GetString();
+                }
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return result;
+    }
+
+    private static Dictionary<string, string> ThemeTokens(string? json)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return result;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var p in doc.RootElement.EnumerateObject().Where(p => p.Value.ValueKind == JsonValueKind.String))
+                {
+                    result[p.Name] = p.Value.GetString() ?? string.Empty;
+                }
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return result;
+    }
+
+    private static string? LogoUri(byte[]? logo, string? contentType) =>
+        logo is { Length: > 0 } && contentType is not null ? $"data:{contentType};base64,{Convert.ToBase64String(logo)}" : null;
+
+    private static string TypeLabel(DocumentType type) => type switch
+    {
+        DocumentType.Quote => "Quote",
+        DocumentType.Invoice => "Invoice",
+        DocumentType.Receipt => "Receipt",
+        _ => "Credit note",
+    };
+}
+
+public sealed record TemplateOption(Guid VersionId, string Name, int Version);
+
+public sealed record ListPublishedTemplatesQuery(DocumentType Type) : IRequest<IReadOnlyList<TemplateOption>>;
+
+public sealed class ListPublishedTemplatesHandler(ITemplateRepository templates)
+    : IRequestHandler<ListPublishedTemplatesQuery, IReadOnlyList<TemplateOption>>
+{
+    public async Task<IReadOnlyList<TemplateOption>> Handle(ListPublishedTemplatesQuery request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var current = await templates.ListCurrentVersionsAsync(request.Type, cancellationToken);
+        var defaults = await templates.ListDefaultsAsync(cancellationToken);
+        var defaultId = defaults.FirstOrDefault(d => d.DocumentType == request.Type)?.TemplateId;
+        return current
+            .OrderByDescending(c => c.Template.Id == defaultId)
+            .Select(c => new TemplateOption(c.Version.Id, c.Template.Name, c.Version.Version))
+            .ToList();
+    }
+}
+
+/// <summary>Live preview (template-rendering §6). Issued documents use their locked template version.</summary>
+public sealed record PreviewDocumentQuery(Guid DocumentId, Guid? TemplateVersionId) : IRequest<Result<string>>;
+
+public sealed class PreviewDocumentHandler(ICurrentBusiness currentBusiness, IDocumentRepository documents, IDocumentHtmlService html)
+    : IRequestHandler<PreviewDocumentQuery, Result<string>>
+{
+    public async Task<Result<string>> Handle(PreviewDocumentQuery request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var loaded = await DraftLoader.LoadAsync(currentBusiness, documents, request.DocumentId, cancellationToken);
+        if (loaded.IsFailure)
+        {
+            return Result.Failure<string>(loaded.Error);
+        }
+
+        var versionId = loaded.Value.TemplateVersionId ?? request.TemplateVersionId;
+        return versionId is null
+            ? Result.Failure<string>(IssueDocumentErrors.TemplateNotFound)
+            : await html.RenderAsync(loaded.Value, versionId.Value, null, cancellationToken);
+    }
+}
+
+/// <summary>Draft PDFs are rendered on demand and not stored; issued ones come from the file store.</summary>
+public sealed record DocumentPdf(byte[] Content, string FileName);
+
+public sealed record GetDocumentPdfQuery(Guid DocumentId, Guid? TemplateVersionId) : IRequest<Result<DocumentPdf>>;
+
+public sealed class GetDocumentPdfHandler(
+    ICurrentBusiness currentBusiness,
+    IDocumentRepository documents,
+    IDocumentHtmlService html,
+    IPdfRenderer pdf,
+    IFileStore files) : IRequestHandler<GetDocumentPdfQuery, Result<DocumentPdf>>
+{
+    public async Task<Result<DocumentPdf>> Handle(GetDocumentPdfQuery request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var loaded = await DraftLoader.LoadAsync(currentBusiness, documents, request.DocumentId, cancellationToken);
+        if (loaded.IsFailure)
+        {
+            return Result.Failure<DocumentPdf>(loaded.Error);
+        }
+
+        var document = loaded.Value;
+        var name = $"{document.Number?.Value ?? "draft"}.pdf";
+        if (document.Number is not null && document.TemplateVersionId is { } locked)
+        {
+            await using var stored = await files.OpenAsync(PdfKeys.For(document.Id, locked), cancellationToken);
+            if (stored is not null)
+            {
+                using var buffer = new MemoryStream();
+                await stored.CopyToAsync(buffer, cancellationToken);
+                return Result.Success(new DocumentPdf(buffer.ToArray(), name));
+            }
+        }
+
+        var versionId = document.TemplateVersionId ?? request.TemplateVersionId;
+        if (versionId is null)
+        {
+            return Result.Failure<DocumentPdf>(IssueDocumentErrors.TemplateNotFound);
+        }
+
+        var rendered = await html.RenderAsync(document, versionId.Value, null, cancellationToken);
+        return rendered.IsFailure
+            ? Result.Failure<DocumentPdf>(rendered.Error)
+            : Result.Success(new DocumentPdf(await pdf.RenderAsync(rendered.Value, cancellationToken), name));
+    }
+}

@@ -1,0 +1,44 @@
+using InvoiceBuilder.Domain.Common;
+
+namespace InvoiceBuilder.Application.Payments;
+
+public interface IPaymentGateway
+{
+    Task<Result<PaymentInitiation>> InitiateWebAsync(PaymentRequest request, CancellationToken ct);
+
+    Task<Result<PaymentInitiation>> InitiateMobileAsync(PaymentRequest request, string phone, MobileMethod method, CancellationToken ct);
+
+    Task<Result<GatewayStatus>> CheckStatusAsync(Guid businessId, string pollUrl, CancellationToken ct);
+
+    bool VerifyCallback(Guid businessId, IReadOnlyDictionary<string, string> fields);
+}
+
+public sealed record PaymentRequest(Guid BusinessId, Guid PaymentId, string Reference, decimal Amount, string Currency, string Description, string PayerEmail, string? ClientToken = null);
+
+public sealed record PaymentInitiation(string? RedirectUrl, string PollUrl, string? Instructions);
+
+// NeedsReview is an addition to paynow.md section 2: it carries the "flag Disputed/Refunded for review" rule of section 5.
+public sealed record GatewayStatus(string Reference, string? ProviderReference, decimal Amount, GatewayState State, bool NeedsReview = false);
+
+public enum GatewayState
+{
+    Pending,
+    Paid,
+    Cancelled,
+    Failed,
+}
+
+public enum MobileMethod
+{
+    EcoCash,
+    OneMoney,
+    InnBucks,
+}
+
+/// <summary>Encrypts and decrypts per-business secrets (Data Protection). Never log or return the plain value.</summary>
+public interface IBusinessSecretStore
+{
+    string Protect(string plainText);
+
+    string Unprotect(string protectedValue);
+}

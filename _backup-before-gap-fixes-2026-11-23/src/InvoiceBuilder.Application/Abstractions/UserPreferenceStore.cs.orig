@@ -1,0 +1,19 @@
+namespace InvoiceBuilder.Application.Abstractions;
+
+/// <summary>Per-user UI preferences: selected business (R2) and dark mode (DS §2, prompt 09).</summary>
+public interface IUserPreferenceStore
+{
+    Task<UserPreferences> GetAsync(string userId, CancellationToken cancellationToken = default);
+
+    /// <summary>The user's display name, used to greet them on the dashboard.</summary>
+    Task<string?> GetDisplayNameAsync(string userId, CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<Guid>> AssignedBusinessIdsAsync(string userId, CancellationToken cancellationToken = default);
+
+    Task SetSelectedBusinessAsync(string userId, Guid businessId, CancellationToken cancellationToken = default);
+
+    /// <summary>Null follows the operating system setting.</summary>
+    Task SetDarkModeAsync(string userId, bool? darkMode, CancellationToken cancellationToken = default);
+}
+
+public sealed record UserPreferences(Guid? SelectedBusinessId, bool? DarkMode);

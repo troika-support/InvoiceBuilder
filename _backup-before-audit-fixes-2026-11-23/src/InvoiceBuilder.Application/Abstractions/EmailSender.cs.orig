@@ -1,0 +1,7 @@
+namespace InvoiceBuilder.Application.Abstractions;
+
+/// <summary>Sends transactional email (password reset). Stub until prompt 21 supplies the real sender.</summary>
+public interface IEmailSender
+{
+    Task SendAsync(string recipient, string subject, string body, CancellationToken cancellationToken = default);
+}

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "page": { "size": "A4", "widthMm": 210, "heightMm": 297 },
+  "firstPage": {
+    "elements": [
+      { "id": "biz", "type": "field", "binding": "business.tradingName", "xMm": 18, "yMm": 16, "widthMm": 100, "heightMm": 8, "sizePt": 14, "weight": 700, "color": "ink" },
+      { "id": "kind", "type": "field", "binding": "document.typeLabel", "xMm": 130, "yMm": 16, "widthMm": 62, "heightMm": 8, "sizePt": 14, "weight": 700, "align": "right", "color": "accent", "uppercase": true },
+      { "id": "num", "type": "field", "binding": "document.number", "xMm": 130, "yMm": 25, "widthMm": 62, "heightMm": 6, "align": "right", "color": "ink" },
+      { "id": "client", "type": "field", "binding": "client.name", "xMm": 18, "yMm": 50, "widthMm": 90, "heightMm": 6, "weight": 700, "color": "ink" },
+      { "id": "issue", "type": "field", "binding": "document.issueDate", "xMm": 130, "yMm": 50, "widthMm": 62, "heightMm": 6, "align": "right", "color": "muted" },
+      { "id": "rule", "type": "line", "xMm": 18, "yMm": 40, "x2Mm": 192, "y2Mm": 40, "stroke": "muted", "strokeWidthMm": 0.2 }
+    ]
+  },
+  "continuationPage": { "itemsTop": 30, "elements": [
+    { "id": "cnum", "type": "field", "binding": "document.number", "xMm": 18, "yMm": 14, "widthMm": 80, "heightMm": 6, "repeat": "all", "color": "muted" }
+  ] },
+  "flow": {
+    "itemsTable": { "xMm": 18, "yMm": 90, "widthMm": 174, "rowHeightMm": 7.5, "headerHeightMm": 8 },
+    "totals": { "mode": "followTable", "gapMm": 12, "xMm": 108, "widthMm": 84, "heightMm": 20 },
+    "instalmentSchedule": { "gapMm": 8, "xMm": 18, "widthMm": 174 },
+    "footerReserveMm": 30
+  }
+}

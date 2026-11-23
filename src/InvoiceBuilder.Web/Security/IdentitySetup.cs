@@ -1,0 +1,53 @@
+using InvoiceBuilder.Application.Abstractions;
+using InvoiceBuilder.Infrastructure.Persistence;
+using Microsoft.AspNetCore.Identity;
+
+namespace InvoiceBuilder.Web.Security;
+
+public static class IdentitySetup
+{
+    /// <summary>Registers Identity, cookie auth, lockout and the scope services. Call before AddInfrastructure so these win over the dev stand-ins.</summary>
+    public static IServiceCollection AddAppIdentity(this IServiceCollection services, IWebHostEnvironment environment)
+    {
+        services.AddHttpContextAccessor();
+        services.AddScoped<RequestScope>();
+        services.AddScoped<CircuitUserAccessor>();
+        services.AddScoped<Microsoft.AspNetCore.Components.Server.Circuits.CircuitHandler, CircuitUserHandler>();
+        services.AddScoped<IScopeOverride>(sp => sp.GetRequiredService<RequestScope>());
+        services.AddScoped<WebCurrentScope>();
+        services.AddScoped<ICurrentTenant>(sp => sp.GetRequiredService<WebCurrentScope>());
+        services.AddScoped<ICurrentBusiness>(sp => sp.GetRequiredService<WebCurrentScope>());
+        services.AddScoped<ICurrentUser>(sp => sp.GetRequiredService<WebCurrentScope>());
+
+        services.AddIdentity<AppUser, IdentityRole>(options =>
+            {
+                options.Lockout.AllowedForNewUsers = true;
+                options.Lockout.MaxFailedAccessAttempts = 5;
+                options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(15);
+                options.User.RequireUniqueEmail = true;
+                options.Password.RequiredLength = 12;
+                options.Password.RequireNonAlphanumeric = false;
+            })
+            .AddEntityFrameworkStores<AppDbContext>()
+            .AddDefaultTokenProviders()
+            .AddClaimsPrincipalFactory<AppClaimsPrincipalFactory>();
+
+        services.ConfigureApplicationCookie(options =>
+        {
+            options.LoginPath = "/account/sign-in";
+            options.AccessDeniedPath = "/account/denied";
+            options.Cookie.HttpOnly = true;
+            options.Cookie.SameSite = SameSiteMode.Lax;
+            options.Cookie.SecurePolicy = environment.IsDevelopment() ? CookieSecurePolicy.SameAsRequest : CookieSecurePolicy.Always;
+            options.SlidingExpiration = true;
+            options.ExpireTimeSpan = TimeSpan.FromHours(8);
+        });
+
+        // Cookies re-check the security stamp this often, so access changes reach open sessions quickly.
+        services.Configure<SecurityStampValidatorOptions>(o => o.ValidationInterval = TimeSpan.FromMinutes(5));
+
+        services.AddAppAuthorization();
+        services.AddCascadingAuthenticationState();
+        return services;
+    }
+}

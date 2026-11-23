@@ -1,0 +1,338 @@
+@page "/clients"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize(Policy = "Staff")]
+@using InvoiceBuilder.Application.Clients
+@using InvoiceBuilder.Application.Shell
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Application.Abstractions.IDisplayFormatter Format
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+@inject IDialogService Dialogs
+@inject ISnackbar Snackbar
+@inject Microsoft.AspNetCore.Components.Authorization.AuthenticationStateProvider AuthState
+
+<PageTitle>Clients · Invoice Builder</PageTitle>
+
+<div class="ib-page-header">
+    <div>
+        <h1 class="ib-page-title">Clients</h1>
+        @if (_page is not null)
+        {
+            <p class="ib-help" style="margin: 0;">@(_page.AllCount == 1 ? "1 client" : $"{_page.AllCount} clients") · @_businessName</p>
+        }
+    </div>
+    <div style="display:flex; gap:12px;">
+        <MudButton Variant="Variant.Outlined" Color="Color.Primary" OnClick="ImportAsync" Disabled="@(_loadError is not null)">Import CSV</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="() => EditAsync(null)" Disabled="@(_loadError is not null)">New client</MudButton>
+    </div>
+</div>
+
+@if (_loadError is not null)
+{
+    <EmptyState Title="@_loadError" Message="Add a business or pick one in the sidebar." />
+}
+else if (_page is null)
+{
+    <MudProgressLinear Indeterminate="true" aria-label="Loading clients" />
+}
+else if (_page.AllCount == 0)
+{
+    <EmptyState Title="No clients yet" Message="Add your first client, or import a CSV of existing ones." />
+}
+else
+{
+    <div class="ib-clients">
+        <section class="ib-card ib-clients__list" aria-label="Client list" style="padding: 20px;">
+            <div class="ib-clients__tools">
+                <MudTextField T="string" Value="_search" ValueChanged="OnSearchAsync" Immediate="true" DebounceInterval="300" Label="Search by name, email or phone"
+                              Variant="Variant.Outlined" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Clearable="true" Class="ib-clients__search" />
+                <MudSelect T="ClientFilter" Value="_filter" ValueChanged="OnFilterAsync" Label="Show" Variant="Variant.Outlined" Class="ib-clients__filter">
+                    <MudSelectItem Value="ClientFilter.All">All clients</MudSelectItem>
+                    <MudSelectItem Value="ClientFilter.WithBalanceDue">With balance due</MudSelectItem>
+                    <MudSelectItem Value="ClientFilter.Overdue">Overdue</MudSelectItem>
+                </MudSelect>
+            </div>
+
+            @if (_page.Items.Count == 0)
+            {
+                <p class="ib-help" role="status">No clients match.</p>
+            }
+            else
+            {
+                <table class="ib-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">Client</th>
+                            <th scope="col">Last document</th>
+                            <th scope="col">Balance</th>
+                            <th scope="col">Billed this year</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var item in _page.Items)
+                        {
+                            <tr class="ib-client-row @(item.Id == _selectedId ? "ib-client-row--selected" : null)">
+                                <td>
+                                    <button type="button" class="ib-client-row__button" @onclick="() => SelectAsync(item.Id)"
+                                            aria-pressed="@(item.Id == _selectedId ? "true" : "false")">
+                                        <span class="ib-avatar" aria-hidden="true">@Initials(item.Name)</span>
+                                        <span>
+                                            <span class="ib-client-row__name">@item.Name</span>
+                                            @if (item.Email is not null)
+                                            {
+                                                <span class="ib-help ib-client-row__email">@item.Email</span>
+                                            }
+                                        </span>
+                                    </button>
+                                </td>
+                                <td>@(item.LastDocumentDate is { } d ? Format.Date(ToOffset(d)) : "—")</td>
+                                <td>@MoneyList(item.Balances)</td>
+                                <td>@MoneyList(item.BilledThisYear)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+
+                <div class="ib-clients__paging">
+                    <span class="ib-help">@PagingText()</span>
+                    <MudButton Variant="Variant.Text" Disabled="@(_pageNumber <= 1)" OnClick="PreviousAsync">Previous</MudButton>
+                    <MudButton Variant="Variant.Text" Disabled="@(_pageNumber * PageSize >= _page.TotalCount)" OnClick="NextAsync">Next</MudButton>
+                </div>
+            }
+        </section>
+
+        <aside class="ib-card ib-clients__detail" aria-label="Client detail" style="padding: 20px;">
+            @if (_detail is null)
+            {
+                <p class="ib-help">Select a client to see their balance, contacts and activity.</p>
+            }
+            else
+            {
+                <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start;">
+                    <div>
+                        <h2 class="ib-section-title">@_detail.Name</h2>
+                        Client since @Format.MonthYear(_detail.CreatedAt)
+                    </div>
+                    <div style="display:flex; gap:4px;">
+                        <MudButton Variant="Variant.Text" OnClick="() => EditAsync(_detail)">Edit</MudButton>
+                        <MudButton Variant="Variant.Text" Color="Color.Error" OnClick="ArchiveAsync">Archive</MudButton>
+                    </div>
+                </div>
+
+                <div class="ib-tiles">
+                    <div class="ib-tile">
+                        <span class="ib-help">Balance due</span>
+                        <strong>@MoneyList(_detail.Balances)</strong>
+                        @if (_detail.Overdue.Count > 0)
+                        {
+                            <span class="ib-help">Overdue: @MoneyList(_detail.Overdue)</span>
+                        }
+                    </div>
+                    <div class="ib-tile">
+                        <span class="ib-help">Avg. days to pay</span>
+                        <strong>@(_detail.AverageDaysToPay is { } avg ? $"{avg:0.#} days" : "—")</strong>
+                    </div>
+                </div>
+
+                <h3 class="ib-card__title">Contacts</h3>
+                <ul class="ib-contacts">
+                    @if (_detail.Email is not null) { <li>Email: @_detail.Email</li> }
+                    @if (_detail.Phone is not null) { <li>Phone: @_detail.Phone</li> }
+                    @if (_detail.WhatsApp is not null) { <li>WhatsApp: @_detail.WhatsApp</li> }
+                    @if (_detail.Address is not null) { <li>Address: @_detail.Address</li> }
+                    @if (_detail.Email is null && _detail.Phone is null && _detail.WhatsApp is null && _detail.Address is null)
+                    {
+                        <li class="ib-help">No contact details yet.</li>
+                    }
+                </ul>
+
+                <div style="display:flex; gap:8px; flex-wrap:wrap; margin: 12px 0;">
+                    <MudButton Variant="Variant.Outlined" Disabled="true">New quote</MudButton>
+                    <MudButton Variant="Variant.Outlined" Disabled="true">New invoice</MudButton>
+                    <MudButton Variant="Variant.Outlined" Disabled="true">Send statement</MudButton>
+                </div>
+
+                <h3 class="ib-card__title">Activity</h3>
+                @if (_detail.Activity.Count == 0)
+                {
+                    <p class="ib-help">Nothing yet.</p>
+                }
+                else
+                {
+                    <ol class="ib-timeline">
+                        @foreach (var entry in _detail.Activity)
+                        {
+                            <li><span>@entry.Summary</span> <span class="ib-help">@Format.Date(entry.OccurredAt) · @Format.Time(entry.OccurredAt)</span></li>
+                        }
+                    </ol>
+                }
+            }
+        </aside>
+    </div>
+}
+
+<ClientDrawer Open="_drawerOpen" Existing="_drawerClient" OnClosed="OnDrawerClosedAsync" />
+
+@code {
+    private const int PageSize = 25;
+
+    private ClientPage? _page;
+    private ClientDetail? _detail;
+    private Guid? _selectedId;
+    private string? _search;
+    private ClientFilter _filter = ClientFilter.All;
+    private int _pageNumber = 1;
+    private bool _drawerOpen;
+    private ClientDetail? _drawerClient;
+    private string? _loadError;
+    private string _businessName = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var user = (await AuthState.GetAuthenticationStateAsync()).User;
+        var shell = await Sender.Send(new GetShellQuery(user.IsInRole("Owner")));
+        if (shell.IsSuccess)
+        {
+            _businessName = shell.Value.Businesses.FirstOrDefault(b => b.Id == shell.Value.SelectedBusinessId)?.Name ?? string.Empty;
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        var result = await Sender.Send(new GetClientsQuery(_search, _filter, _pageNumber, PageSize));
+        if (result.IsFailure)
+        {
+            _loadError = result.Error.Message;
+            return;
+        }
+
+        _loadError = null;
+        _page = result.Value;
+    }
+
+    private async Task OnSearchAsync(string? value)
+    {
+        _search = value;
+        _pageNumber = 1;
+        await LoadAsync();
+    }
+
+    private async Task OnFilterAsync(ClientFilter value)
+    {
+        _filter = value;
+        _pageNumber = 1;
+        await LoadAsync();
+    }
+
+    private async Task PreviousAsync()
+    {
+        _pageNumber--;
+        await LoadAsync();
+    }
+
+    private async Task NextAsync()
+    {
+        _pageNumber++;
+        await LoadAsync();
+    }
+
+    private async Task SelectAsync(Guid id)
+    {
+        _selectedId = id;
+        var result = await Sender.Send(new GetClientDetailQuery(id));
+        _detail = result.IsSuccess ? result.Value : null;
+        if (_detail is not null)
+        {
+            Announcer.Announce($"{_detail.Name} selected.");
+        }
+    }
+
+    private void EditAsync(ClientDetail? existing)
+    {
+        _drawerClient = existing;
+        _drawerOpen = true;
+    }
+
+    private async Task OnDrawerClosedAsync(Guid? savedId)
+    {
+        var wasNew = _drawerClient is null;
+        _drawerOpen = false;
+        _drawerClient = null;
+        if (savedId is { } id)
+        {
+            Snackbar.Add(wasNew ? "Client added." : "Client updated.", Severity.Success);
+            await LoadAsync();
+            await SelectAsync(id);
+        }
+    }
+
+    private async Task ImportAsync()
+    {
+        var dialog = await Dialogs.ShowAsync<ImportClientsDialog>("Import clients", new DialogOptions { MaxWidth = MaxWidth.Medium, FullWidth = true });
+        var result = await dialog.Result;
+        if (result is { Canceled: false, Data: int count })
+        {
+            var message = count == 1 ? "1 client imported." : $"{count} clients imported.";
+            Snackbar.Add(message, Severity.Success);
+            Announcer.Announce(message);
+            _pageNumber = 1;
+            await LoadAsync();
+        }
+    }
+
+    private async Task ArchiveAsync()
+    {
+        if (_detail is null)
+        {
+            return;
+        }
+
+        var confirmed = await Dialogs.ShowMessageBoxAsync(
+            $"Archive {_detail.Name}?",
+            "They disappear from this list, but their documents and history are kept.",
+            yesText: "Archive",
+            cancelText: "Cancel");
+        if (confirmed != true)
+        {
+            return;
+        }
+
+        var result = await Sender.Send(new ArchiveClientCommand(_detail.Id));
+        if (result.IsFailure)
+        {
+            Snackbar.Add(result.Error.Message, Severity.Error);
+            return;
+        }
+
+        Snackbar.Add("Client archived.", Severity.Success);
+        _detail = null;
+        _selectedId = null;
+        _pageNumber = 1;
+        await LoadAsync();
+    }
+
+    private string MoneyList(IReadOnlyDictionary<string, decimal> amounts) =>
+        amounts.Count == 0 ? "—" : string.Join(" · ", amounts.OrderBy(a => a.Key).Select(a => Format.Money(a.Value, a.Key)));
+
+    private static string CurrencyLabel(string code) => code == "ZWG" ? "ZiG" : code;
+
+    private static string Initials(string name)
+    {
+        var parts = name.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return parts.Length == 0 ? "?" : string.Concat(parts.Take(2).Select(p => char.ToUpperInvariant(p[0])));
+    }
+
+    private static DateTimeOffset ToOffset(DateOnly date) => new(date.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+
+    private string PagingText()
+    {
+        if (_page is null || _page.TotalCount == 0)
+        {
+            return string.Empty;
+        }
+
+        var from = ((_pageNumber - 1) * PageSize) + 1;
+        var to = Math.Min(_pageNumber * PageSize, _page.TotalCount);
+        return $"{from}–{to} of {_page.TotalCount}";
+    }
+}

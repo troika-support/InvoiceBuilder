@@ -1,0 +1,130 @@
+@page "/settings/reminders"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize(Policy = "Owner")]
+@using InvoiceBuilder.Application.Businesses.Settings
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+
+<PageTitle>Reminders · Settings · Invoice Builder</PageTitle>
+
+<h1 class="ib-page-title">Business settings</h1>
+<div class="ib-settings">
+    <SettingsNav />
+    <section class="ib-settings__body" aria-labelledby="section-title">
+        <h2 id="section-title" class="ib-section-title">Reminders</h2>
+
+        @if (_loadError is not null)
+        {
+            <EmptyState Title="@_loadError" Message="Add a business or pick one in the sidebar." />
+        }
+        else if (_model is null)
+        {
+            <MudProgressLinear Indeterminate="true" aria-label="Loading settings" />
+        }
+        else
+        {
+            @if (_formError is not null)
+            {
+                <MudAlert Severity="Severity.Error" role="alert" Class="mb-4">@_formError</MudAlert>
+            }
+
+            <div class="ib-card" style="padding: 20px;">
+                <h3 class="ib-card__title">Payment reminders</h3>
+                <MudSwitch T="bool" @bind-Value="_model.Enabled" Color="Color.Primary" Label="Send payment reminders" />
+                <p class="ib-help">You can pause reminders for a single invoice from that invoice.</p>
+                @if (_model.Enabled)
+                {
+                    <div class="ib-form-grid">
+                        <MudNumericField T="int" @bind-Value="_model.DaysBeforeDue" Label="Days before the due date" Min="0" Max="60" Variant="Variant.Outlined"
+                                         Error="@HasError("DaysBeforeDue")" ErrorText="@ErrorFor("DaysBeforeDue")" />
+                        <MudNumericField T="int" @bind-Value="_model.RepeatEveryDays" Label="Repeat overdue reminders every (days)" Min="1" Max="60" Variant="Variant.Outlined"
+                                         Error="@HasError("RepeatEveryDays")" ErrorText="@ErrorFor("RepeatEveryDays")" />
+                        <MudNumericField T="int" @bind-Value="_model.MaxAfterDue" Label="Most overdue reminders" Min="0" Max="10" Variant="Variant.Outlined"
+                                         Error="@HasError("MaxAfterDue")" ErrorText="@ErrorFor("MaxAfterDue")" />
+                    </div>
+                    <MudSwitch T="bool" @bind-Value="_model.OnDueDate" Color="Color.Primary" Label="Also remind on the due date" />
+                }
+            </div>
+
+            <div class="ib-settings__footer" style="margin-top: 16px;">
+                <MudButton Variant="Variant.Text" OnClick="DiscardAsync" Disabled="_saving">Discard</MudButton>
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveAsync" Disabled="_saving">Save changes</MudButton>
+            </div>
+        }
+    </section>
+</div>
+
+@code {
+    private Model? _model;
+    private string? _loadError;
+    private string? _formError;
+    private bool _saving;
+    private IReadOnlyDictionary<string, string[]> _fieldErrors = new Dictionary<string, string[]>();
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        var result = await Sender.Send(new GetReminderSettingsQuery());
+        if (result.IsFailure)
+        {
+            _loadError = "No business selected";
+            _model = null;
+            return;
+        }
+
+        _loadError = null;
+        var r = result.Value;
+        _model = new Model { Enabled = r.Enabled, DaysBeforeDue = r.DaysBeforeDue, OnDueDate = r.OnDueDate, RepeatEveryDays = r.RepeatEveryDays, MaxAfterDue = r.MaxAfterDue };
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_model is null)
+        {
+            return;
+        }
+
+        _saving = true;
+        _formError = null;
+        _fieldErrors = new Dictionary<string, string[]>();
+        try
+        {
+            var result = await Sender.Send(new UpdateReminderSettingsCommand(_model.Enabled, _model.DaysBeforeDue, _model.OnDueDate, _model.RepeatEveryDays, _model.MaxAfterDue));
+            if (result.IsFailure)
+            {
+                _fieldErrors = result.Error.FieldErrors ?? new Dictionary<string, string[]>();
+                _formError = result.Error.Message;
+                Announcer.Announce(result.Error.Message);
+                return;
+            }
+
+            Announcer.Toast("Settings saved", Severity.Success);
+            await LoadAsync();
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task DiscardAsync()
+    {
+        _formError = null;
+        _fieldErrors = new Dictionary<string, string[]>();
+        await LoadAsync();
+        Announcer.Announce("Changes discarded");
+    }
+
+    private bool HasError(string field) => _fieldErrors.ContainsKey(field);
+
+    private string? ErrorFor(string field) => _fieldErrors.TryGetValue(field, out var messages) ? string.Join(" ", messages) : null;
+
+    private sealed class Model
+    {
+        public bool Enabled { get; set; }
+        public int DaysBeforeDue { get; set; }
+        public bool OnDueDate { get; set; }
+        public int RepeatEveryDays { get; set; }
+        public int MaxAfterDue { get; set; }
+    }
+}

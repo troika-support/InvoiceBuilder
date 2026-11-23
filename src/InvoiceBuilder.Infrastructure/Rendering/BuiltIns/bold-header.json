@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "page": { "size": "A4", "widthMm": 210, "heightMm": 297 },
+  "firstPage": {
+    "elements": [
+      { "id": "band", "type": "shape", "xMm": 0, "yMm": 0, "widthMm": 210, "heightMm": 44, "fill": "accent" },
+      { "id": "biz", "type": "field", "binding": "business.tradingName", "xMm": 18, "yMm": 14, "widthMm": 110, "heightMm": 10, "sizePt": 20, "weight": 800, "color": "paper" },
+      { "id": "kind", "type": "field", "binding": "document.typeLabel", "xMm": 130, "yMm": 14, "widthMm": 62, "heightMm": 10, "sizePt": 18, "weight": 700, "align": "right", "color": "paper", "uppercase": true },
+      { "id": "num", "type": "field", "binding": "document.number", "xMm": 130, "yMm": 26, "widthMm": 62, "heightMm": 6, "align": "right", "color": "paper" },
+      { "id": "to", "type": "text", "text": "Billed to", "xMm": 18, "yMm": 54, "widthMm": 60, "heightMm": 5, "sizePt": 8, "color": "muted", "uppercase": true },
+      { "id": "client", "type": "field", "binding": "client.name", "xMm": 18, "yMm": 60, "widthMm": 90, "heightMm": 6, "weight": 700, "color": "ink" },
+      { "id": "issue", "type": "field", "binding": "document.issueDate", "xMm": 130, "yMm": 60, "widthMm": 62, "heightMm": 6, "align": "right", "color": "ink" }
+    ]
+  },
+  "continuationPage": { "itemsTop": 34, "elements": [
+    { "id": "cband", "type": "shape", "xMm": 0, "yMm": 0, "widthMm": 210, "heightMm": 18, "fill": "accent", "repeat": "all" },
+    { "id": "cnum", "type": "field", "binding": "document.number", "xMm": 18, "yMm": 6, "widthMm": 80, "heightMm": 6, "repeat": "all", "color": "paper" }
+  ] },
+  "flow": {
+    "itemsTable": { "xMm": 18, "yMm": 92, "widthMm": 174, "rowHeightMm": 8, "headerHeightMm": 9, "zebra": true },
+    "totals": { "mode": "followTable", "gapMm": 12, "xMm": 108, "widthMm": 84, "heightMm": 22 },
+    "instalmentSchedule": { "gapMm": 8, "xMm": 18, "widthMm": 174 },
+    "footerReserveMm": 30
+  }
+}

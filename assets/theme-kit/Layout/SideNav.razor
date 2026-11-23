@@ -1,0 +1,61 @@
+@* Sidebar navigation by role (design-system §7). Business switcher is a separate component (prompt 09). *@
+@inject NavigationManager Nav
+
+<nav class="ib-nav @(Rail ? "ib-nav--rail" : null)" aria-label="Main">
+    <div style="display:flex; align-items:center; gap:10px; padding:0 8px">
+        <span class="ib-nav__mark" aria-hidden="true">IB</span>
+        @if (!Rail)
+        {
+            <span style="font-weight:700; font-size:16px; color:#FFFFFF">Invoice Builder</span>
+        }
+    </div>
+
+    @if (!Rail)
+    {
+        <BusinessSwitcher />
+    }
+
+    <div style="display:flex; flex-direction:column; gap:2px">
+        @foreach (var item in Items)
+        {
+            <AuthorizeView Policy="@item.Policy">
+                <a class="ib-nav__link ib-motion" href="@item.Href" aria-current="@(IsCurrent(item.Href) ? "page" : null)" aria-label="@(Rail ? item.Text : null)">
+                    <MudIcon Icon="@item.Icon" Size="Size.Small" aria-hidden="true" />
+                    @if (!Rail) { <span>@item.Text</span> }
+                </a>
+            </AuthorizeView>
+        }
+    </div>
+
+    <AuthorizeView Policy="Owner">
+        <a class="ib-nav__link ib-motion" style="margin-top:auto" href="/settings/profile" aria-current="@(IsCurrent("/settings") ? "page" : null)" aria-label="@(Rail ? "Settings" : null)">
+            <MudIcon Icon="@Icons.Material.Outlined.Settings" Size="Size.Small" aria-hidden="true" />
+            @if (!Rail) { <span>Settings</span> }
+        </a>
+    </AuthorizeView>
+</nav>
+
+@code {
+    [Parameter] public bool Rail { get; set; }
+
+    private sealed record NavItem(string Text, string Href, string Icon, string Policy);
+
+    private static readonly NavItem[] Items =
+    [
+        new("Dashboard", "/", Icons.Material.Outlined.Dashboard, "Staff"),
+        new("Quotes", "/quotes", Icons.Material.Outlined.RequestQuote, "Staff"),
+        new("Invoices", "/invoices", Icons.Material.Outlined.ReceiptLong, "Staff"),
+        new("Receipts & credit notes", "/receipts", Icons.Material.Outlined.TaskAlt, "Staff"),
+        new("Clients", "/clients", Icons.Material.Outlined.Groups, "Staff"),
+        new("Catalogue", "/catalogue", Icons.Material.Outlined.Inventory2, "Staff"),
+        new("Templates", "/templates", Icons.Material.Outlined.DesignServices, "Owner"),
+        new("Payments", "/payments", Icons.Material.Outlined.Payments, "Staff"),
+        new("Recurring", "/recurring", Icons.Material.Outlined.EventRepeat, "Owner"),
+    ];
+
+    private bool IsCurrent(string href)
+    {
+        var path = "/" + Nav.ToBaseRelativePath(Nav.Uri).Split('?')[0];
+        return href == "/" ? path == "/" : path.StartsWith(href, StringComparison.OrdinalIgnoreCase);
+    }
+}

@@ -1,0 +1,26 @@
+@page "/account/setup"
+@model InvoiceBuilder.Web.Pages.Account.SetupModel
+@{
+    ViewData["Title"] = "Set up";
+}
+<h1>Set up your account</h1>
+<p>Create the first Owner account. You will be asked to set up two-factor sign-in next.</p>
+@if (Model.Error is not null)
+{
+    <p class="auth-error" role="alert">@Model.Error</p>
+}
+<form method="post">
+    <label class="auth-field">Business or company name
+        <input asp-for="TenantName" type="text" autocomplete="organization" required />
+    </label>
+    <label class="auth-field">Email
+        <input asp-for="Email" type="email" autocomplete="username" required />
+    </label>
+    <label class="auth-field">Password (at least 12 characters)
+        <input asp-for="Password" type="password" autocomplete="new-password" minlength="12" required />
+    </label>
+    <label class="auth-field">Confirm password
+        <input asp-for="ConfirmPassword" type="password" autocomplete="new-password" minlength="12" required />
+    </label>
+    <button class="auth-button" type="submit">Create account</button>
+</form>

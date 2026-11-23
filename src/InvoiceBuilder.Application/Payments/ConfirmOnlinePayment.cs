@@ -1,0 +1,162 @@
+using InvoiceBuilder.Application.Abstractions;
+using InvoiceBuilder.Domain.Common;
+using InvoiceBuilder.Domain.Documents;
+using InvoiceBuilder.Domain.Payments;
+using InvoiceBuilder.Domain.ValueObjects;
+using MediatR;
+
+namespace InvoiceBuilder.Application.Payments;
+
+public enum ConfirmOutcome
+{
+    Confirmed,
+    AlreadyProcessed,
+    StillPending,
+    FlaggedForReview,
+    Failed,
+}
+
+/// <summary>
+/// Applies a gateway status to a payment (paynow.md section 3, step 5). Idempotent. Needs-review outcomes return
+/// success so the flag is saved; only real errors fail (and roll back).
+/// </summary>
+public sealed record ConfirmOnlinePaymentCommand(Guid PaymentId, GatewayStatus Status, bool FlagForReview = false)
+    : ITransactionalCommand<Result<ConfirmOutcome>>;
+
+public sealed class ConfirmOnlinePaymentHandler(
+    IPaymentRepository payments,
+    IDocumentRepository documents,
+    INumberSequenceRepository numbers,
+    IActivityLog activity,
+    InvoiceBuilder.Application.Notifications.INotificationRepository notifications,
+    TimeProvider timeProvider) : IRequestHandler<ConfirmOnlinePaymentCommand, Result<ConfirmOutcome>>
+{
+    private static readonly TimeSpan HarareOffset = TimeSpan.FromHours(2);
+
+    public async Task<Result<ConfirmOutcome>> Handle(ConfirmOnlinePaymentCommand request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var now = timeProvider.GetUtcNow();
+
+        var payment = await payments.GetByIdAsync(request.PaymentId, cancellationToken);
+        if (payment is null)
+        {
+            return Result.Failure<ConfirmOutcome>(new Error("Payment.NotFound", "That payment could not be found."));
+        }
+
+        if (payment.Status != PaymentStatus.Pending)
+        {
+            return Result.Success(ConfirmOutcome.AlreadyProcessed);
+        }
+
+        var status = request.Status;
+        var review = request.FlagForReview || status.NeedsReview;
+
+        switch (status.State)
+        {
+            case GatewayState.Pending:
+                return Result.Success(ConfirmOutcome.StillPending);
+
+            case GatewayState.Cancelled:
+            case GatewayState.Failed:
+                payment.Fail(now);
+                if (review)
+                {
+                    payment.FlagForReview($"Paynow reported this payment as {status.State}; check Paynow.", now);
+                }
+
+                await activity.AddAsync("Payment", payment.Id, "PaymentFailed", $"Payment {payment.Reference} {status.State}.", cancellationToken);
+                notifications.Add(InvoiceBuilder.Domain.Notifications.Notification.Create(payment.TenantId, payment.BusinessId, InvoiceBuilder.Domain.Notifications.NotificationKind.PaymentFailed,
+                    "Payment failed", $"Payment {payment.Reference} {status.State}.", "/payments", now));
+                return Result.Success(ConfirmOutcome.Failed);
+
+            default:
+                return await ConfirmPaidAsync(payment, status, now, cancellationToken);
+        }
+    }
+
+    private async Task<Result<ConfirmOutcome>> ConfirmPaidAsync(Payment payment, GatewayStatus status, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (status.Amount != payment.Amount)
+        {
+            payment.FlagForReview($"Paynow reported {status.Amount:0.00} but {payment.Amount:0.00} was requested.", now);
+            await activity.AddAsync("Payment", payment.Id, "PaymentFlagged", $"Payment {payment.Reference} amount mismatch; not confirmed.", cancellationToken);
+            return Result.Success(ConfirmOutcome.FlaggedForReview);
+        }
+
+        var invoices = new List<(Document Invoice, decimal Amount)>();
+        foreach (var allocation in payment.Allocations)
+        {
+            var invoice = await documents.GetByIdAsync(allocation.DocumentId, cancellationToken);
+            if (invoice is null || invoice.Number is null || invoice.TemplateVersionId is null)
+            {
+                return Result.Failure<ConfirmOutcome>(new Error("Payment.InvoiceNotFound", "An allocated invoice could not be found."));
+            }
+
+            invoices.Add((invoice, allocation.Amount));
+        }
+
+        if (invoices.Count == 0)
+        {
+            return Result.Failure<ConfirmOutcome>(new Error("Payment.NoAllocations", "The payment has no allocations."));
+        }
+
+        payment.SetProviderDetails(status.ProviderReference, null, now);
+        var confirmed = payment.Confirm(now);
+        if (confirmed.IsFailure)
+        {
+            return Result.Failure<ConfirmOutcome>(confirmed.Error);
+        }
+
+        // The gateway has the client's money, so the payment is always confirmed. Anything unusual about the invoice
+        // is flagged for the owner instead of failing (a failure would roll back and later expire a real payment).
+        var problems = new List<string>();
+        foreach (var (invoice, amount) in invoices)
+        {
+            if (invoice.Status == DocumentStatus.Void)
+            {
+                problems.Add($"{invoice.Number!.Value} was voided before this payment arrived; refund or reallocate it");
+                continue;
+            }
+
+            var credited = (await documents.ListCreditNotesAsync(invoice.Id, cancellationToken)).Sum(c => c.Total);
+            var paidBefore = await payments.ConfirmedAllocatedTotalAsync(invoice.Id, cancellationToken);
+            var balanceAfter = PaymentAllocator.Balance(invoice.Total, credited, paidBefore + amount);
+            if (balanceAfter < 0m)
+            {
+                problems.Add($"{invoice.Number!.Value} is overpaid by {-balanceAfter:0.00} {invoice.Currency}; refund or credit the client");
+            }
+
+            var applied = invoice.ApplyPaymentStatus(credited, paidBefore + amount, now);
+            if (applied.IsFailure)
+            {
+                problems.Add($"{invoice.Number!.Value} status could not be updated ({applied.Error.Message})");
+            }
+        }
+
+        if (problems.Count > 0)
+        {
+            payment.FlagForReview(string.Join("; ", problems) + ".", now);
+            await activity.AddAsync("Payment", payment.Id, "PaymentFlagged", $"Payment {payment.Reference} needs review: {string.Join("; ", problems)}.", cancellationToken);
+            notifications.Add(InvoiceBuilder.Domain.Notifications.Notification.Create(payment.TenantId, payment.BusinessId, InvoiceBuilder.Domain.Notifications.NotificationKind.PaymentFailed,
+                "Payment needs review", $"Payment {payment.Reference}: {string.Join("; ", problems)}.", "/payments", now));
+        }
+
+        var receipt = await ReceiptIssuing.IssueAsync(numbers, payment, invoices, now, cancellationToken);
+        if (receipt.IsFailure)
+        {
+            return Result.Failure<ConfirmOutcome>(receipt.Error);
+        }
+
+        documents.Add(receipt.Value);
+        await activity.AddAsync(
+            "Payment",
+            payment.Id,
+            "PaymentConfirmed",
+            $"Payment {payment.Reference} confirmed; receipt {receipt.Value.Number!.Value} issued.",
+            cancellationToken);
+        notifications.Add(InvoiceBuilder.Domain.Notifications.Notification.Create(payment.TenantId, payment.BusinessId, InvoiceBuilder.Domain.Notifications.NotificationKind.PaymentConfirmed,
+            "Payment received", $"Payment {payment.Reference} confirmed; receipt {receipt.Value.Number!.Value} issued.", "/payments", now));
+        return Result.Success(ConfirmOutcome.Confirmed);
+    }
+}

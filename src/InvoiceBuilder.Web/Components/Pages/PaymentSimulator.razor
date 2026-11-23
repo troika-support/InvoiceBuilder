@@ -1,0 +1,87 @@
+@page "/dev/payments"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize(Policy = InvoiceBuilder.Web.Security.Policies.Owner)]
+@using InvoiceBuilder.Domain.Payments
+@using InvoiceBuilder.Infrastructure.Payments.Fake
+@inject IServiceProvider Services
+@inject NavigationManager Navigation
+
+<PageTitle>Payment simulator</PageTitle>
+
+@if (_simulator is null)
+{
+    <h1>Not found</h1>
+    <p>The payment simulator is only available when <code>Payments:UseFake</code> is true in Development.</p>
+}
+else
+{
+    @* TODO(question): restrict to the Owner role once authentication exists (prompt 08). *@
+    <h1>Payment simulator</h1>
+    <p>Development only. Each button posts a correctly hashed form to the real webhook.</p>
+
+    @if (_message is not null)
+    {
+        <p role="status">@_message</p>
+    }
+
+    @if (_pending.Count == 0)
+    {
+        <p>No pending payments.</p>
+    }
+    else
+    {
+        <table>
+            <thead>
+                <tr>
+                    <th scope="col">Reference</th>
+                    <th scope="col">Amount</th>
+                    <th scope="col">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var payment in _pending)
+                {
+                    <tr>
+                        <td>@payment.Reference</td>
+                        <td>@payment.Amount.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture) @payment.Currency</td>
+                        <td>
+                            <button type="button" @onclick="() => SimulateAsync(payment, SimulatedResult.Paid, TimeSpan.Zero)">Simulate paid</button>
+                            <button type="button" @onclick="() => SimulateAsync(payment, SimulatedResult.Cancelled, TimeSpan.Zero)">Simulate cancelled</button>
+                            <button type="button" @onclick="() => SimulateAsync(payment, SimulatedResult.Paid, TimeSpan.FromSeconds(30))">Simulate paid after 30 s</button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+
+    <button type="button" @onclick="LoadAsync">Refresh</button>
+}
+
+@code {
+    private FakePaymentSimulator? _simulator;
+    private IReadOnlyList<Payment> _pending = [];
+    private string? _message;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _simulator = Services.GetService(typeof(FakePaymentSimulator)) as FakePaymentSimulator;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        if (_simulator is not null)
+        {
+            _pending = await _simulator.ListPendingAsync(CancellationToken.None);
+        }
+    }
+
+    private async Task SimulateAsync(Payment payment, SimulatedResult result, TimeSpan delay)
+    {
+        var error = await _simulator!.SimulateAsync(payment.Id, result, new Uri(Navigation.BaseUri), delay, CancellationToken.None);
+        _message = error ?? (delay > TimeSpan.Zero
+            ? $"Paid will be sent in {delay.TotalSeconds:0} seconds."
+            : $"Simulated {result} for {payment.Reference}.");
+        await LoadAsync();
+    }
+}

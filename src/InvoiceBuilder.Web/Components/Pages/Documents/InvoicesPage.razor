@@ -1,0 +1,4 @@
+@page "/invoices"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize(Policy = "Staff")]
+
+<DocumentListView Kind="invoices" />

@@ -1,0 +1,48 @@
+using System.Security.Cryptography;
+using System.Text;
+
+namespace InvoiceBuilder.Infrastructure.Payments.Paynow;
+
+/// <summary>
+/// Paynow message hash ("Generating Hash" / "Validating Hash", developers.paynow.co.zw): the URL-decoded values of all
+/// fields except "hash", in the order they appear, with no separators, followed by the integration key; UTF-8,
+/// SHA-512, uppercase hex. The docs' worked example is a unit test.
+/// </summary>
+public static class PaynowHash
+{
+    private const string HashField = "hash";
+
+    public static string Compute(IReadOnlyDictionary<string, string> fields, string integrationKey)
+    {
+        ArgumentNullException.ThrowIfNull(fields);
+        ArgumentNullException.ThrowIfNull(integrationKey);
+
+        var text = new StringBuilder();
+        foreach (var (name, value) in fields)
+        {
+            if (!name.Equals(HashField, StringComparison.OrdinalIgnoreCase))
+            {
+                text.Append(value);
+            }
+        }
+
+        text.Append(integrationKey);
+        return Convert.ToHexString(SHA512.HashData(Encoding.UTF8.GetBytes(text.ToString())));
+    }
+
+    /// <summary>Constant-time comparison. A missing hash is never valid.</summary>
+    public static bool Verify(IReadOnlyDictionary<string, string> fields, string integrationKey)
+    {
+        ArgumentNullException.ThrowIfNull(fields);
+
+        var supplied = fields.FirstOrDefault(f => f.Key.Equals(HashField, StringComparison.OrdinalIgnoreCase)).Value;
+        if (string.IsNullOrWhiteSpace(supplied))
+        {
+            return false;
+        }
+
+        var expected = Encoding.ASCII.GetBytes(Compute(fields, integrationKey));
+        var actual = Encoding.ASCII.GetBytes(supplied.Trim().ToUpperInvariant());
+        return CryptographicOperations.FixedTimeEquals(expected, actual);
+    }
+}

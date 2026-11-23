@@ -1,0 +1,180 @@
+@page "/settings/team"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize(Policy = "Owner")]
+@using InvoiceBuilder.Application.Businesses.Settings
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+@inject IDialogService Dialogs
+
+<PageTitle>Team &amp; access · Settings · Invoice Builder</PageTitle>
+
+<h1 class="ib-page-title">Business settings</h1>
+<div class="ib-settings">
+    <SettingsNav />
+    <section class="ib-settings__body" aria-labelledby="section-title">
+        <h2 id="section-title" class="ib-section-title">Team &amp; access</h2>
+
+        @if (_loadError is not null)
+        {
+            <EmptyState Title="@_loadError" Message="Add a business or pick one in the sidebar." />
+        }
+        else if (_members is null)
+        {
+            <MudProgressLinear Indeterminate="true" aria-label="Loading team" />
+        }
+        else
+        {
+            @if (_formError is not null)
+            {
+                <MudAlert Severity="Severity.Error" role="alert" Class="mb-4">@_formError</MudAlert>
+            }
+
+            <div class="ib-card" style="padding: 20px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+                    <p class="ib-help" style="margin: 0; flex: 1 1 320px;">Owners can see every business. Staff only see the businesses they are given. Changes apply the next time they sign in.</p>
+                    <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="AddAsync">+ Add a team member</MudButton>
+                </div>
+                <table class="ib-table" style="margin-top: 16px;">
+                    <thead>
+                        <tr>
+                            <th scope="col">Name</th>
+                            <th scope="col">Email</th>
+                            <th scope="col">Role</th>
+                            <th scope="col">Status</th>
+                            <th scope="col">Access to this business</th>
+                            <th scope="col"><span class="ib-visually-hidden">Actions</span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var member in _members)
+                        {
+                            <tr>
+                                <th scope="row">@member.Name</th>
+                                <td>@member.Email</td>
+                                <td>@(member.IsOwner ? "Owner" : "Staff")</td>
+                                <td>@(member.IsActive ? "Active" : "Deactivated")</td>
+                                <td>
+                                    @if (member.IsOwner)
+                                    {
+                                        <span>All businesses</span>
+                                    }
+                                    else
+                                    {
+                                        <MudSwitch T="bool" Value="member.HasAccess" ValueChanged="@(v => SetAccessAsync(member, v))" Color="Color.Primary"
+                                                   Disabled="_busy" Label="@(member.HasAccess ? "Has access" : "No access")"
+                                                   aria-label="@($"Access for {member.Name}")" />
+                                    }
+                                </td>
+                                <td>
+                                    @if (!member.IsOwner)
+                                    {
+                                        <MudButton Variant="Variant.Text" OnClick="() => EditAsync(member)" Disabled="_busy" aria-label="@($"Edit {member.Name}")">Edit</MudButton>
+                                        <MudButton Variant="Variant.Text" OnClick="() => ResetPasswordAsync(member)" Disabled="_busy" aria-label="@($"Reset password for {member.Name}")">Reset password</MudButton>
+                                        <MudButton Variant="Variant.Text" OnClick="() => ResetTwoFactorAsync(member)" Disabled="_busy" aria-label="@($"Reset two-factor sign-in for {member.Name}")">Reset 2FA</MudButton>
+                                        <MudButton Variant="Variant.Text" OnClick="() => ToggleActiveAsync(member)" Disabled="_busy"
+                                                   aria-label="@((member.IsActive ? "Deactivate " : "Reactivate ") + member.Name)">@(member.IsActive ? "Deactivate" : "Reactivate")</MudButton>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+</div>
+
+@code {
+    private IReadOnlyList<TeamMember>? _members;
+    private string? _loadError;
+    private string? _formError;
+    private bool _busy;
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        var result = await Sender.Send(new GetTeamQuery());
+        if (result.IsFailure)
+        {
+            _loadError = "No business selected";
+            _members = null;
+            return;
+        }
+
+        _loadError = null;
+        _members = result.Value;
+    }
+
+    private async Task RunAsync(Func<Task<InvoiceBuilder.Domain.Common.Result>> action, string successMessage)
+    {
+        _busy = true;
+        _formError = null;
+        var result = await action();
+        if (result.IsFailure)
+        {
+            _formError = result.Error.Message;
+            Announcer.Announce(result.Error.Message);
+        }
+        else
+        {
+            Announcer.Toast(successMessage, Severity.Success);
+        }
+
+        await LoadAsync();
+        _busy = false;
+    }
+
+    private Task SetAccessAsync(TeamMember member, bool grant) =>
+        RunAsync(() => Sender.Send(new SetStaffAccessCommand(member.UserId, grant)),
+            grant ? $"{member.Name} now has access." : $"{member.Name} no longer has access.");
+
+    private Task ToggleActiveAsync(TeamMember member) =>
+        RunAsync(() => Sender.Send(new SetTeamMemberActiveCommand(member.UserId, !member.IsActive)),
+            member.IsActive ? $"{member.Name} was deactivated." : $"{member.Name} was reactivated.");
+
+    private async Task ResetTwoFactorAsync(TeamMember member)
+    {
+        var confirmed = await Dialogs.ShowMessageBoxAsync(
+            $"Reset two-factor sign-in for {member.Name}?",
+            "They will be asked to set up two-factor sign-in again the next time they sign in.",
+            yesText: "Reset 2FA",
+            cancelText: "Cancel");
+        if (confirmed == true)
+        {
+            await RunAsync(() => Sender.Send(new ResetTeamMemberTwoFactorCommand(member.UserId)), $"Two-factor sign-in was reset for {member.Name}.");
+        }
+    }
+
+    private async Task AddAsync()
+    {
+        var dialog = await Dialogs.ShowAsync<AddTeamMemberDialog>("Add a team member");
+        if (!(await dialog.Result)!.Canceled)
+        {
+            Announcer.Toast("Team member added", Severity.Success);
+            await LoadAsync();
+            StateHasChanged();
+        }
+    }
+
+    private async Task EditAsync(TeamMember member)
+    {
+        var parameters = new DialogParameters<EditTeamMemberDialog> { { x => x.UserId, member.UserId }, { x => x.MemberName, member.Name } };
+        var dialog = await Dialogs.ShowAsync<EditTeamMemberDialog>("Edit team member", parameters);
+        if (!(await dialog.Result)!.Canceled)
+        {
+            Announcer.Toast("Team member updated", Severity.Success);
+            await LoadAsync();
+            StateHasChanged();
+        }
+    }
+
+    private async Task ResetPasswordAsync(TeamMember member)
+    {
+        var parameters = new DialogParameters<ResetPasswordDialog> { { x => x.UserId, member.UserId }, { x => x.MemberName, member.Name } };
+        var dialog = await Dialogs.ShowAsync<ResetPasswordDialog>("Reset password", parameters);
+        if (!(await dialog.Result)!.Canceled)
+        {
+            Announcer.Toast($"Password was reset for {member.Name}.", Severity.Success);
+        }
+    }
+}

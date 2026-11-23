@@ -1,0 +1,150 @@
+using Hangfire;
+using InvoiceBuilder.Application.Abstractions;
+using InvoiceBuilder.Application.Documents;
+using InvoiceBuilder.Application.Messaging;
+using InvoiceBuilder.Application.Options;
+using InvoiceBuilder.Domain.Messaging;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
+namespace InvoiceBuilder.Infrastructure.Services;
+
+public sealed class HangfireMessageJobScheduler(IBackgroundJobClient jobs, ICurrentTenant tenant, ICurrentBusiness business) : IMessageJobScheduler
+{
+    public void Enqueue(Guid messageId, string link, string? userMessage)
+    {
+        if (business.BusinessId is not { } businessId)
+        {
+            throw new InvalidOperationException("A business must be selected to send a document.");
+        }
+
+        var tenantId = tenant.TenantId;
+        jobs.Enqueue<SendOutboundMessageJob>(j => j.RunAsync(messageId, tenantId, businessId, link, userMessage, CancellationToken.None));
+    }
+}
+
+/// <summary>Sends one queued message and records the outcome (R28). Failures are stored on the message and shown on the document.</summary>
+public sealed partial class SendOutboundMessageJob(
+    IScopeOverride scope,
+    IOutboundMessageRepository messages,
+    IDocumentRepository documents,
+    IClientRepository clients,
+    IBusinessSettingsRepository settings,
+    InvoiceBuilder.Application.Payments.IBusinessSecretStore secrets,
+    IFileStore files,
+    IUnitOfWork unitOfWork,
+    IActivityLog activity,
+    IRichEmailSender email,
+    IWhatsAppSender whatsApp,
+    IDisplayFormatter format,
+    IOptions<WhatsAppOptions> whatsAppOptions,
+    InvoiceBuilder.Application.Documents.ClientLinkService links,
+    TimeProvider timeProvider,
+    ILogger<SendOutboundMessageJob> logger)
+{
+    [Queue("default")]
+    [AutomaticRetry(Attempts = 0)]
+    public async Task RunAsync(Guid messageId, Guid tenantId, Guid businessId, string link, string? userMessage, CancellationToken cancellationToken)
+    {
+        scope.UseScope(tenantId, businessId);
+        var message = await messages.GetByIdAsync(messageId, cancellationToken);
+        if (message is null || message.Status != MessageStatus.Queued || message.DocumentId is not { } documentId)
+        {
+            return;
+        }
+
+        var document = await documents.GetByIdAsync(documentId, cancellationToken);
+        if (document is null || document.Number is null)
+        {
+            message.MarkFailed("The document could not be found.", timeProvider.GetUtcNow());
+            await unitOfWork.SaveChangesAsync(cancellationToken);
+            return;
+        }
+
+        if (string.IsNullOrEmpty(link))
+        {
+            // New jobs carry no link (Hangfire keeps arguments in plain text); read it from the document instead.
+            if (links.UrlFor(document) is not { } resolved)
+            {
+                message.MarkFailed("The client link could not be found. Send the document again.", timeProvider.GetUtcNow());
+                await unitOfWork.SaveChangesAsync(cancellationToken);
+                return;
+            }
+
+            link = resolved;
+        }
+
+        var client = await clients.GetByIdAsync(document.ClientId, cancellationToken);
+        var name = client?.Name ?? "there";
+        var number = document.Number.Value.ToString();
+        var amount = format.Money(document.Total, document.Currency.ToString());
+        var businessSettings = await settings.GetAsync(businessId, cancellationToken);
+        var fromName = string.IsNullOrWhiteSpace(businessSettings?.EmailFromName) ? null : businessSettings.EmailFromName;
+
+        try
+        {
+            if (message.Channel == MessageChannel.Email)
+            {
+                var content = message.TemplateName switch
+                {
+                    MessageTemplates.ReminderEmail => EmailContent.ReminderNote(name, number, userMessage ?? amount, link, false),
+                    MessageTemplates.InstalmentReminderEmail => EmailContent.ReminderNote(name, number, userMessage ?? amount, link, true),
+                    MessageTemplates.PlanRescheduledEmail => EmailContent.PlanRescheduled(name, number, link),
+                    _ when document.Type == Domain.Documents.DocumentType.Receipt => EmailContent.Receipt(name, number, amount, link),
+                    _ => EmailContent.Document(name, number, amount, link, userMessage),
+                };
+                var attachment = await LoadPdfAsync(document, number, cancellationToken);
+                await email.SendAsync(new EmailMessage(message.To, content.Subject, content.Html, content.Text, attachment, fromName, businessSettings?.EmailReplyTo), cancellationToken);
+                message.MarkSent(null, timeProvider.GetUtcNow());
+            }
+            else
+            {
+                var o = whatsAppOptions.Value;
+                var token = businessSettings is { WhatsAppTokenEncrypted.Length: > 0 } ? secrets.Unprotect(businessSettings.WhatsAppTokenEncrypted) : null;
+                var template = document.Type == Domain.Documents.DocumentType.Receipt ? o.PaymentReceiptTemplate : o.DocumentLinkTemplate;
+                var result = await whatsApp.SendTemplateAsync(new WhatsAppTemplateMessage(message.To, template, [name, number, amount, link], businessSettings?.WhatsAppPhoneNumberId, token), cancellationToken);
+                if (result.IsFailure)
+                {
+                    message.MarkFailed(result.Error.Message, timeProvider.GetUtcNow());
+                    await activity.AddAsync(nameof(Domain.Documents.Document), document.Id, "SendFailed", $"{number} could not be sent by WhatsApp: {result.Error.Message}", cancellationToken);
+                    await unitOfWork.SaveChangesAsync(cancellationToken);
+                    return;
+                }
+
+                message.MarkSent(result.Value, timeProvider.GetUtcNow());
+            }
+
+            document.MarkSent(timeProvider.GetUtcNow());
+            await activity.AddAsync(nameof(Domain.Documents.Document), document.Id, "Sent", $"{number} sent by {message.Channel}.", cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogFailed(logger, message.Id, message.Channel);
+            message.MarkFailed(ex.Message, timeProvider.GetUtcNow());
+            await activity.AddAsync(nameof(Domain.Documents.Document), document.Id, "SendFailed", $"{number} could not be sent by {message.Channel}: {ex.Message}", cancellationToken);
+        }
+
+        await unitOfWork.SaveChangesAsync(cancellationToken);
+    }
+
+    private async Task<EmailAttachment?> LoadPdfAsync(Domain.Documents.Document document, string number, CancellationToken cancellationToken)
+    {
+        if (document.TemplateVersionId is not { } versionId)
+        {
+            return null;
+        }
+
+        await using var stream = await files.OpenAsync(PdfKeys.For(document.Id, versionId), cancellationToken);
+        if (stream is null)
+        {
+            return null;
+        }
+
+        using var buffer = new MemoryStream();
+        await stream.CopyToAsync(buffer, cancellationToken);
+        return new EmailAttachment($"{number}.pdf", "application/pdf", buffer.ToArray());
+    }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Outbound message {MessageId} on {Channel} failed.")]
+    private static partial void LogFailed(ILogger logger, Guid messageId, MessageChannel channel);
+}

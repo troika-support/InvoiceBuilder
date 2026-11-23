@@ -1,0 +1,24 @@
+@* Left section nav for S10 Business settings (DS §8.10). *@
+@inject NavigationManager Nav
+
+<nav class="ib-settings-nav" aria-label="Settings sections">
+    @foreach (var (text, href) in Sections)
+    {
+        <a class="ib-settings-nav__link ib-motion" href="@href" aria-current="@(IsCurrent(href) ? "page" : null)">@text</a>
+    }
+</nav>
+
+@code {
+    private static readonly (string Text, string Href)[] Sections =
+    [
+        ("Profile & numbering", "/settings/profile"),
+        ("Tax & currency", "/settings/tax"),
+        ("Payment methods", "/settings/payments"),
+        ("Email & WhatsApp", "/settings/messaging"),
+        ("Reminders", "/settings/reminders"),
+        ("Team & access", "/settings/team"),
+    ];
+
+    private bool IsCurrent(string href) =>
+        ("/" + Nav.ToBaseRelativePath(Nav.Uri).Split('?')[0]).Equals(href, StringComparison.OrdinalIgnoreCase);
+}

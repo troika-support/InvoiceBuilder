@@ -1,0 +1,71 @@
+using InvoiceBuilder.Application.Abstractions;
+using InvoiceBuilder.Application.Payments;
+using InvoiceBuilder.Domain.Payments;
+using InvoiceBuilder.Web.Controllers;
+using MediatR;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Primitives;
+using NSubstitute;
+using Shouldly;
+
+namespace InvoiceBuilder.Integration.Tests.Payments;
+
+public sealed class PaynowWebhookTests
+{
+    private readonly IPaymentGatewayConfigRepository _configs = Substitute.For<IPaymentGatewayConfigRepository>();
+    private readonly IScopeOverride _scope = Substitute.For<IScopeOverride>();
+    private readonly IPaymentGateway _gateway = Substitute.For<IPaymentGateway>();
+    private readonly IPaymentRepository _payments = Substitute.For<IPaymentRepository>();
+    private readonly ISender _sender = Substitute.For<ISender>();
+    private readonly Guid _businessId = Guid.NewGuid();
+
+    private PaynowWebhookController Controller(Dictionary<string, StringValues> form)
+    {
+        var context = new DefaultHttpContext();
+        context.Request.ContentType = "application/x-www-form-urlencoded";
+        context.Request.Form = new FormCollection(form);
+        return new PaynowWebhookController(_configs, _scope, _gateway, _payments, _sender, NullLogger<PaynowWebhookController>.Instance)
+        {
+            ControllerContext = new ControllerContext { HttpContext = context },
+        };
+    }
+
+    [Fact]
+    public async Task R19_bad_hash_returns_400_and_confirms_nothing()
+    {
+        var config = PaymentGatewayConfig.Create(Guid.NewGuid(), _businessId, PaymentProvider.Paynow, "123", "encrypted", false, DateTimeOffset.UtcNow).Value;
+        _configs.GetForWebhookAsync(_businessId, PaymentProvider.Paynow, Arg.Any<CancellationToken>()).Returns(config);
+        _gateway.VerifyCallback(_businessId, Arg.Any<IReadOnlyDictionary<string, string>>()).Returns(false);
+
+        var result = await Controller(new() { ["reference"] = "INV-1", ["hash"] = "BAD" }).Receive(_businessId, CancellationToken.None);
+
+        result.ShouldBeOfType<BadRequestResult>();
+        await _sender.DidNotReceiveWithAnyArgs().Send(Arg.Any<ConfirmOnlinePaymentCommand>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task R19_unknown_reference_returns_200_and_confirms_nothing()
+    {
+        var config = PaymentGatewayConfig.Create(Guid.NewGuid(), _businessId, PaymentProvider.Paynow, "123", "encrypted", false, DateTimeOffset.UtcNow).Value;
+        _configs.GetForWebhookAsync(_businessId, PaymentProvider.Paynow, Arg.Any<CancellationToken>()).Returns(config);
+        _gateway.VerifyCallback(_businessId, Arg.Any<IReadOnlyDictionary<string, string>>()).Returns(true);
+        _payments.GetByReferenceAsync("NOPE", Arg.Any<CancellationToken>()).Returns((Payment?)null);
+
+        var result = await Controller(new() { ["reference"] = "NOPE", ["hash"] = "OK" }).Receive(_businessId, CancellationToken.None);
+
+        result.ShouldBeOfType<OkResult>();
+        await _sender.DidNotReceiveWithAnyArgs().Send(Arg.Any<ConfirmOnlinePaymentCommand>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task R19_unknown_business_returns_400()
+    {
+        _configs.GetForWebhookAsync(_businessId, PaymentProvider.Paynow, Arg.Any<CancellationToken>()).Returns((PaymentGatewayConfig?)null);
+
+        var result = await Controller(new() { ["reference"] = "INV-1" }).Receive(_businessId, CancellationToken.None);
+
+        result.ShouldBeOfType<BadRequestResult>();
+    }
+}

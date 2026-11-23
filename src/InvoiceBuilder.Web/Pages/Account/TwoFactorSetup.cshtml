@@ -1,0 +1,35 @@
+@page "/account/2fa/setup"
+@model InvoiceBuilder.Web.Pages.Account.TwoFactorSetupModel
+@{
+    ViewData["Title"] = "Set up two-factor sign-in";
+}
+
+@if (Model.RecoveryCodes is { } codes)
+{
+    <h1>Save your recovery codes</h1>
+    <p>Keep these somewhere safe. Each code works once if you lose your phone. You will not see them again.</p>
+    <ul class="auth-code">
+        @foreach (var c in codes)
+        {
+            <li>@c</li>
+        }
+    </ul>
+    <p><a href="/">I have saved them</a></p>
+}
+else
+{
+    <h1>Set up two-factor sign-in</h1>
+    <p>Owners need an authenticator app. Scan the code, then enter the 6-digit number it shows.</p>
+    <img class="auth-qr" alt="QR code for your authenticator app" src="data:image/png;base64,@Model.QrCodeBase64" />
+    <p>Or type this key: <span class="auth-code">@Model.SharedKey</span></p>
+    @if (Model.Error is not null)
+    {
+        <p class="auth-error" role="alert">@Model.Error</p>
+    }
+    <form method="post">
+        <label class="auth-field">Code from your app
+            <input asp-for="Code" inputmode="numeric" autocomplete="one-time-code" required />
+        </label>
+        <button class="auth-button" type="submit">Turn on two-factor sign-in</button>
+    </form>
+}

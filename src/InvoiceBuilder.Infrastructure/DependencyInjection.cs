@@ -1,0 +1,140 @@
+using InvoiceBuilder.Application.Abstractions;
+using InvoiceBuilder.Application.Businesses.Settings;
+using InvoiceBuilder.Application.Options;
+using InvoiceBuilder.Infrastructure.Payments.Fake;
+using InvoiceBuilder.Application.Payments;
+using InvoiceBuilder.Infrastructure.Payments;
+using InvoiceBuilder.Infrastructure.Payments.Paynow;
+using InvoiceBuilder.Application.Templates;
+using InvoiceBuilder.Infrastructure.Persistence;
+using InvoiceBuilder.Infrastructure.Rendering;
+using InvoiceBuilder.Infrastructure.Services;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Http.Resilience;
+
+namespace InvoiceBuilder.Infrastructure;
+
+public static class DependencyInjection
+{
+    public const string ConnectionStringName = "InvoiceBuilder";
+
+    public static IServiceCollection AddInfrastructure(this IServiceCollection services, IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        services.AddSingleton(TimeProvider.System);
+
+        // Dev scope; the Web layer replaces these with the signed-in user's tenant and business.
+        services.TryAddScoped<RequestScope>();
+        services.TryAddScoped<IScopeOverride>(sp => sp.GetRequiredService<RequestScope>());
+        services.TryAddScoped<ICurrentTenant>(sp => sp.GetRequiredService<RequestScope>());
+        services.TryAddScoped<ICurrentBusiness>(sp => sp.GetRequiredService<RequestScope>());
+        services.TryAddScoped<ICurrentUser, DevCurrentUser>();
+        services.AddScoped<IActivityLog, ActivityLog>();
+        services.AddSingleton<IFileStore, LocalFileStore>();
+        services.TryAddSingleton<IBuiltInTemplates, BuiltInTemplates>();
+        services.AddSingleton<IFiscalisationService, NoOpFiscalisationService>();
+
+        services.AddScoped<AuditTimestampInterceptor>();
+        services.AddDbContext<AppDbContext>((provider, options) => options
+            .UseSqlServer(configuration.GetConnectionString(ConnectionStringName))
+            .AddInterceptors(provider.GetRequiredService<AuditTimestampInterceptor>()));
+
+        services.AddScoped<IUnitOfWork, UnitOfWork>();
+        services.AddScoped<IUserPreferenceStore, UserPreferenceStore>();
+        services.AddScoped<ITeamStore, TeamStore>();
+        services.AddScoped<IBusinessRepository, BusinessRepository>();
+        services.AddScoped<IBusinessSettingsRepository, BusinessSettingsRepository>();
+        services.AddScoped<IClientRepository, ClientRepository>();
+        services.AddScoped<InvoiceBuilder.Application.Clients.IClientQueries, ClientQueries>();
+        services.AddScoped<InvoiceBuilder.Application.Documents.IDocumentListQueries, DocumentListQueries>();
+        services.AddMemoryCache();
+        services.AddScoped<InvoiceBuilder.Application.Dashboard.IDashboardQueries, DashboardQueries>();
+        services.AddScoped<InvoiceBuilder.Application.Clients.IStatementQueries, StatementQueries>();
+        services.AddScoped<InvoiceBuilder.Application.Clients.IStatementJobScheduler, HangfireStatementJobScheduler>();
+        services.AddScoped<SendStatementJob>();
+        services.AddSingleton<InvoiceBuilder.Application.Dashboard.IDashboardCache, MemoryDashboardCache>();
+        services.AddScoped<InvoiceBuilder.Application.Payments.IPaymentQueries, PaymentQueries>();
+        services.AddScoped<InvoiceBuilder.Application.Catalogue.ICatalogueQueries, CatalogueQueries>();
+        services.AddScoped<ICatalogueRepository, CatalogueRepository>();
+        services.AddScoped<IDocumentRepository, DocumentRepository>();
+        services.AddScoped<IPaymentRepository, PaymentRepository>();
+        services.AddScoped<IPaymentGatewayConfigRepository, PaymentGatewayConfigRepository>();
+        services.AddDataProtection();
+        services.AddSingleton<IBusinessSecretStore, DataProtectionBusinessSecretStore>();
+        services.AddSingleton<InvoiceBuilder.Application.Documents.IClientLinkTokenProtector, DataProtectionClientLinkTokenProtector>();
+        if (configuration.GetValue<bool>($"{PaymentOptions.SectionName}:{nameof(PaymentOptions.UseFake)}"))
+        {
+            services.AddSingleton<FakePaymentState>();
+            services.AddScoped<IPaymentGateway, FakePaymentGateway>();
+            services.AddScoped<FakePaymentSimulator>();
+            services.AddHttpClient(nameof(FakePaymentSimulator));
+        }
+        else
+        {
+            services.AddHttpClient<IPaymentGateway, PaynowGateway>(client =>
+                {
+                    client.BaseAddress = new Uri("https://www.paynow.co.zw/");
+                })
+                // No automatic retry of POSTs: a resent request after a timeout could start a second
+                // payment (a second phone prompt) or send an email twice. Jobs and polling retry safely instead.
+                .AddStandardResilienceHandler(o => o.Retry.DisableForUnsafeHttpMethods());
+        }
+        services.AddScoped<ITemplateRepository, TemplateRepository>();
+        services.AddScoped<IRecurringRepository, RecurringRepository>();
+        services.AddScoped<INumberSequenceRepository, NumberSequenceRepository>();
+        services.AddScoped<DevDataSeeder>();
+
+        services.AddScoped<InvoiceBuilder.Application.Messaging.IOutboundMessageRepository, InvoiceBuilder.Infrastructure.Persistence.Configurations.OutboundMessageRepository>();
+        services.AddScoped<InvoiceBuilder.Application.Messaging.IMessageJobScheduler, HangfireMessageJobScheduler>();
+        services.AddScoped<SendOutboundMessageJob>();
+        services.AddScoped<RemindersJob>();
+        services.AddScoped<RecurringInvoicesJob>();
+        services.AddScoped<InvoiceBuilder.Application.Notifications.INotificationRepository, InvoiceBuilder.Infrastructure.Persistence.Configurations.NotificationRepository>();
+        services.AddScoped<ExpireQuotesJob>();
+        services.AddScoped<PollPendingPaymentsJob>();
+        services.AddScoped<InvoiceBuilder.Application.Messaging.IReminderRepository, InvoiceBuilder.Infrastructure.Persistence.Configurations.ReminderRepository>();
+        if (string.Equals(configuration[$"{EmailOptions.SectionName}:{nameof(EmailOptions.Provider)}"], "SendGrid", StringComparison.OrdinalIgnoreCase))
+        {
+            services.AddHttpClient<InvoiceBuilder.Infrastructure.Email.SendGridEmailSender>(client => client.BaseAddress = new Uri("https://api.sendgrid.com/"))
+                // No automatic retry of POSTs: a resent request after a timeout could start a second
+                // payment (a second phone prompt) or send an email twice. Jobs and polling retry safely instead.
+                .AddStandardResilienceHandler(o => o.Retry.DisableForUnsafeHttpMethods());
+            services.AddScoped<InvoiceBuilder.Application.Messaging.IRichEmailSender>(sp => sp.GetRequiredService<InvoiceBuilder.Infrastructure.Email.SendGridEmailSender>());
+            services.AddScoped<IEmailSender, InvoiceBuilder.Infrastructure.Email.RichEmailSenderAdapter>();
+        }
+        else
+        {
+            services.AddSingleton<InvoiceBuilder.Application.Messaging.IRichEmailSender, InvoiceBuilder.Infrastructure.Email.LogOnlyEmailSender>();
+            services.AddSingleton<IEmailSender, InvoiceBuilder.Infrastructure.Email.LoggingEmailSender>();
+        }
+
+        if (string.Equals(configuration[$"{WhatsAppOptions.SectionName}:{nameof(WhatsAppOptions.Provider)}"], "Cloud", StringComparison.OrdinalIgnoreCase))
+        {
+            services.AddHttpClient<InvoiceBuilder.Application.Messaging.IWhatsAppSender, InvoiceBuilder.Infrastructure.Email.WhatsAppCloudSender>(client => client.BaseAddress = new Uri("https://graph.facebook.com/"))
+                // No automatic retry of POSTs: a resent request after a timeout could start a second
+                // payment (a second phone prompt) or send an email twice. Jobs and polling retry safely instead.
+                .AddStandardResilienceHandler(o => o.Retry.DisableForUnsafeHttpMethods());
+        }
+        else
+        {
+            services.AddSingleton<InvoiceBuilder.Application.Messaging.IWhatsAppSender, InvoiceBuilder.Infrastructure.Email.LogOnlyWhatsAppSender>();
+        }
+
+        services.AddSingleton(_ => new FontEmbedder(FontEmbedder.DefaultDirectory));
+        services.AddSingleton<BindingResolver>();
+        services.AddSingleton<ITemplateRenderer, HtmlTemplateRenderer>();
+        services.AddSingleton<InvoiceBuilder.Application.Clients.IStatementRenderer, StatementHtmlRenderer>();
+        services.AddSingleton<PlaywrightBrowserPool>();
+        services.AddSingleton<IBrowserPool>(provider => provider.GetRequiredService<PlaywrightBrowserPool>());
+        services.AddSingleton<IPdfRenderer, PlaywrightPdfRenderer>();
+
+        services.AddScoped<InvoiceBuilder.Application.Documents.IPdfJobScheduler, HangfirePdfJobScheduler>();
+        services.AddScoped<GenerateDocumentPdfJob>();
+
+        return services;
+    }
+}

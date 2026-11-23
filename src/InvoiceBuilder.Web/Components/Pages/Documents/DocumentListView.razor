@@ -1,0 +1,422 @@
+@using InvoiceBuilder.Application.Clients
+@using InvoiceBuilder.Application.Documents
+@using InvoiceBuilder.Domain.Documents
+@using InvoiceBuilder.Web.Components.Pages.Payments
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Application.Abstractions.IDisplayFormatter Format
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+@inject ISnackbar Snackbar
+@inject NavigationManager Nav
+@inject IJSRuntime Js
+@inject IDialogService Dialogs
+
+<PageTitle>@Heading · Invoice Builder</PageTitle>
+
+<div class="ib-page-header">
+    <div>
+        <h1 class="ib-page-title">@Heading</h1>
+        @if (_page is not null)
+        {
+            <p class="ib-help" style="margin: 0;">@(_page.AllCount == 1 ? $"1 {Noun}" : $"{_page.AllCount} {Noun}s")</p>
+        }
+    </div>
+    <div style="display:flex; gap:12px;">
+        <MudButton Variant="Variant.Outlined" Color="Color.Primary" OnClick="ExportAsync" Disabled="@(_page is null || _page.TotalCount == 0)">Export CSV</MudButton>
+        @if (Kind != "receipts")
+        {
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" Href="@($"/{Kind}/new")">@(Kind == "quotes" ? "New quote" : "New invoice")</MudButton>
+        }
+    </div>
+</div>
+
+@if (Kind == "receipts")
+{
+    <MudTabs ActivePanelIndex="_tab" ActivePanelIndexChanged="OnTabAsync" Class="mb-3">
+        <MudTabPanel Text="Receipts" />
+        <MudTabPanel Text="Credit notes" />
+    </MudTabs>
+}
+
+@if (_loadError is not null)
+{
+    <EmptyState Title="@_loadError" Message="Add a business or pick one in the sidebar." />
+}
+else if (_page is null)
+{
+    <MudProgressLinear Indeterminate="true" aria-label="@($"Loading {Heading.ToLowerInvariant()}")" />
+}
+else if (_page.AllCount == 0)
+{
+    <EmptyState Title="@EmptyTitle" Message="@EmptyMessage" />
+}
+else
+{
+    <section class="ib-card" aria-label="@($"{Heading} list")" style="padding: 20px;">
+        <div class="ib-form-grid">
+            <MudTextField T="string" Value="_search" ValueChanged="OnSearchAsync" Immediate="true" DebounceInterval="300" Label="Search number or client"
+                          Variant="Variant.Outlined" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Clearable="true" />
+            <MudSelect T="DocumentStatus" MultiSelection="true" SelectedValues="_statuses" SelectedValuesChanged="OnStatusesAsync" Label="Status" Variant="Variant.Outlined">
+                @foreach (var s in StatusOptions)
+                {
+                    <MudSelectItem T="DocumentStatus" Value="s">@s</MudSelectItem>
+                }
+            </MudSelect>
+            <MudSelect T="Guid?" Value="_clientId" ValueChanged="OnClientAsync" Label="Client" Variant="Variant.Outlined" Clearable="true"
+                       ToStringFunc="@(id => _clients.FirstOrDefault(c => c.Id == id)?.Name ?? string.Empty)">
+                @foreach (var c in _clients)
+                {
+                    <MudSelectItem T="Guid?" Value="c.Id">@c.Name</MudSelectItem>
+                }
+            </MudSelect>
+            <MudDatePicker Date="_from" DateChanged="OnFromAsync" Label="Issued from" Variant="Variant.Outlined" Clearable="true" />
+            <MudDatePicker Date="_to" DateChanged="OnToAsync" Label="Issued to" Variant="Variant.Outlined" Clearable="true" />
+            <MudSelect T="string" Value="_currency" ValueChanged="OnCurrencyAsync" Label="Currency" Variant="Variant.Outlined" Clearable="true">
+                <MudSelectItem T="string" Value="@("USD")">USD</MudSelectItem>
+                <MudSelectItem T="string" Value="@("ZWG")">ZiG</MudSelectItem>
+            </MudSelect>
+        </div>
+        @if (Kind == "invoices")
+        {
+            <MudSwitch T="bool" Value="_overdueOnly" ValueChanged="OnOverdueAsync" Label="Overdue only" Color="Color.Primary" />
+        }
+
+        @if (_page.Items.Count == 0)
+        {
+            <p class="ib-help" role="status">No @(Noun)s match these filters.</p>
+        }
+        else
+        {
+            <table class="ib-table">
+                <thead>
+                    <tr>
+                        <th scope="col" aria-sort="@Sort(DocumentListSort.Number)"><button type="button" class="ib-link-button" @onclick="() => SortByAsync(DocumentListSort.Number)">Number</button></th>
+                        <th scope="col" aria-sort="@Sort(DocumentListSort.Client)"><button type="button" class="ib-link-button" @onclick="() => SortByAsync(DocumentListSort.Client)">Client</button></th>
+                        <th scope="col" aria-sort="@Sort(DocumentListSort.Issued)"><button type="button" class="ib-link-button" @onclick="() => SortByAsync(DocumentListSort.Issued)">Issued</button></th>
+                        <th scope="col">@(Kind == "quotes" ? "Valid to" : "Due")</th>
+                        <th scope="col" class="ib-num" aria-sort="@Sort(DocumentListSort.Amount)"><button type="button" class="ib-link-button" @onclick="() => SortByAsync(DocumentListSort.Amount)">Amount</button></th>
+                        @if (Kind == "invoices")
+                        {
+                            <th scope="col" class="ib-num">Balance</th>
+                        }
+                        <th scope="col" aria-sort="@Sort(DocumentListSort.Status)"><button type="button" class="ib-link-button" @onclick="() => SortByAsync(DocumentListSort.Status)">Status</button></th>
+                        <th scope="col"><span class="ib-visually-hidden">Actions</span></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in _page.Items)
+                    {
+                        <tr>
+                            <td>
+                                @if (row.Type is DocumentType.Quote or DocumentType.Invoice)
+                                {
+                                    <a href="@($"/{Kind}/{row.Id}")">@(row.Number ?? "Draft")</a>
+                                }
+                                else
+                                {
+                                    @(row.Number ?? "—")
+                                }
+                            </td>
+                            <td>@row.ClientName</td>
+                            <td>@DateText(row.IssueDate)</td>
+                            <td>@DateText(row.DueOrValidUntil)</td>
+                            <td class="ib-num"><MoneyText Amount="row.Total" Currency="@row.Currency" /></td>
+                            @if (Kind == "invoices")
+                            {
+                                <td class="ib-num">@(row.Balance is { } b ? Format.Money(b, row.Currency) : "—")</td>
+                            }
+                            <td>
+                                @if (row.DaysLate is { } late)
+                                {
+                                    <StatusPill Status="StatusKind.Overdue" Label="@($"{late} {(late == 1 ? "day" : "days")} late")" />
+                                }
+                                else
+                                {
+                                    <StatusPill Status="PillKind(row.Status)" Label="@PillLabel(row.Status)" />
+                                }
+                            </td>
+                            <td>
+                                <MudMenu Icon="@Icons.Material.Outlined.MoreVert" AriaLabel="@($"Actions for {row.Number ?? "draft"}")" Size="Size.Medium">
+                                    @if (row.Status != DocumentStatus.Draft)
+                                    {
+                                        @if (row.Status != DocumentStatus.Void && row.Type is DocumentType.Quote or DocumentType.Invoice or DocumentType.Receipt)
+                                        {
+                                            <MudMenuItem OnClick="() => SendAgainAsync(row)">Send again…</MudMenuItem>
+                                        }
+                                        <MudMenuItem Href="@($"/api/documents/{row.Id}/pdf")" Target="_blank">Download PDF</MudMenuItem>
+                                    }
+                                    @if (row.Type == DocumentType.Invoice && row.Balance is > 0)
+                                    {
+                                        <MudMenuItem OnClick="() => OpenRecordPayment(row)">Record payment…</MudMenuItem>
+                                    }
+                                    @if (row.Type == DocumentType.Invoice && row.Status != DocumentStatus.Draft)
+                                    {
+                                        <AuthorizeView Policy="Owner" Context="owner">
+                                            <MudMenuItem Href="@($"/invoices/{row.Id}")">Create credit note… (opens the invoice)</MudMenuItem>
+                                        </AuthorizeView>
+                                    }
+                                    @if (row.Type == DocumentType.Quote && row.Status == DocumentStatus.Accepted)
+                                    {
+                                        <MudMenuItem OnClick="() => ConvertAsync(row)">Convert to invoice</MudMenuItem>
+                                    }
+                                    @if (row.Type is DocumentType.Quote or DocumentType.Invoice)
+                                    {
+                                        <MudMenuItem OnClick="() => DuplicateAsync(row)">Duplicate</MudMenuItem>
+                                    }
+                                </MudMenu>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+
+            <div style="display:flex; align-items:center; gap:12px; margin-top:12px;">
+                <span class="ib-help">@PagingText()</span>
+                <MudButton Variant="Variant.Text" Disabled="@(_pageNumber <= 1)" OnClick="PreviousAsync">Previous</MudButton>
+                <MudButton Variant="Variant.Text" Disabled="@(_pageNumber * PageSize >= _page.TotalCount)" OnClick="NextAsync">Next</MudButton>
+            </div>
+        }
+    </section>
+}
+
+<RecordPaymentDrawer Open="_paymentOpen" ClientId="_paymentClientId" OnClosed="OnPaymentClosedAsync" />
+
+@code {
+    private const int PageSize = 25;
+
+    private bool _paymentOpen;
+    private Guid? _paymentClientId;
+
+    private async Task SendAgainAsync(DocumentListRow row)
+    {
+        var target = await Sender.Send(new GetSendTargetQuery(row.Id));
+        if (target.IsFailure)
+        {
+            Snackbar.Add(target.Error.Message, Severity.Error);
+            return;
+        }
+
+        var t = target.Value;
+        var parameters = new DialogParameters<SendDialog>
+        {
+            { x => x.DocumentId, t.DocumentId },
+            { x => x.Number, t.Number },
+            { x => x.Amount, t.Amount },
+            { x => x.ClientName, t.ClientName },
+            { x => x.ClientEmail, t.ClientEmail },
+            { x => x.ClientPhone, t.ClientPhone },
+        };
+        var dialog = await Dialogs.ShowAsync<SendDialog>("Send", parameters);
+        var result = await dialog.Result;
+        if (result is { Canceled: false })
+        {
+            Announcer.Toast($"Sending {t.Number}. Check the document activity for the result.", Severity.Success);
+            await LoadAsync();
+        }
+    }
+
+    private void OpenRecordPayment(DocumentListRow row)
+    {
+        _paymentClientId = row.ClientId == Guid.Empty ? null : row.ClientId;
+        _paymentOpen = true;
+    }
+
+    private async Task OnPaymentClosedAsync(bool saved)
+    {
+        _paymentOpen = false;
+        _paymentClientId = null;
+        if (saved)
+        {
+            await LoadAsync();
+        }
+    }
+
+    [Parameter, EditorRequired] public string Kind { get; set; } = "invoices";
+
+    private DocumentListPage? _page;
+    private string? _loadError;
+    private IReadOnlyList<ClientListItem> _clients = [];
+    private string? _search;
+    private IReadOnlyCollection<DocumentStatus> _statuses = [];
+    private Guid? _clientId;
+    private DateTime? _from;
+    private DateTime? _to;
+    private string? _currency;
+    private bool _overdueOnly;
+    private DocumentListSort _sort = DocumentListSort.Issued;
+    private bool _descending = true;
+    private int _pageNumber = 1;
+    private int _tab;
+
+    private string Heading => Kind switch { "quotes" => "Quotes", "receipts" => "Receipts & credit notes", _ => "Invoices" };
+    private string Noun => Kind switch { "quotes" => "quote", "receipts" => _tab == 1 ? "credit note" : "receipt", _ => "invoice" };
+
+    private string EmptyTitle => Kind switch { "quotes" => "No quotes yet", "receipts" => _tab == 1 ? "No credit notes yet" : "No receipts yet", _ => "No invoices yet" };
+
+    private string EmptyMessage => Kind switch
+    {
+        "quotes" => "Create a quote to send a client a price they can accept.",
+        "receipts" => _tab == 1 ? "Credit notes appear here when you correct an issued invoice." : "Receipts appear here when a payment is confirmed.",
+        _ => "Create your first invoice to start getting paid.",
+    };
+
+    private static readonly DocumentStatus[] AllStatuses = Enum.GetValues<DocumentStatus>();
+
+    private IEnumerable<DocumentStatus> StatusOptions => Kind switch
+    {
+        "quotes" => [DocumentStatus.Draft, DocumentStatus.Sent, DocumentStatus.Viewed, DocumentStatus.Accepted, DocumentStatus.Declined, DocumentStatus.Expired, DocumentStatus.Converted],
+        "invoices" => [DocumentStatus.Draft, DocumentStatus.Issued, DocumentStatus.Sent, DocumentStatus.Viewed, DocumentStatus.PartPaid, DocumentStatus.Paid, DocumentStatus.Void],
+        _ => AllStatuses,
+    };
+
+    private DocumentType[] Types => Kind switch
+    {
+        "quotes" => [DocumentType.Quote],
+        "receipts" => _tab == 1 ? [DocumentType.CreditNote] : [DocumentType.Receipt],
+        _ => [DocumentType.Invoice],
+    };
+
+    protected override async Task OnInitializedAsync()
+    {
+        var clients = await Sender.Send(new GetClientsQuery(null, ClientFilter.All, 1, 500));
+        _clients = clients.IsSuccess ? clients.Value.Items : [];
+        await LoadAsync();
+    }
+
+    private DocumentListFilter BuildFilter() => new(
+        Types,
+        _statuses.ToList(),
+        _overdueOnly,
+        _clientId,
+        ToDateOnly(_from),
+        ToDateOnly(_to),
+        _currency,
+        _search,
+        _sort,
+        _descending);
+
+    private async Task LoadAsync()
+    {
+        var result = await Sender.Send(new GetDocumentsQuery(BuildFilter(), _pageNumber, PageSize));
+        if (result.IsFailure)
+        {
+            _loadError = result.Error.Message;
+            return;
+        }
+
+        _loadError = null;
+        _page = result.Value;
+        Announcer.Announce($"{_page.TotalCount} {Noun}{(_page.TotalCount == 1 ? string.Empty : "s")} shown");
+    }
+
+    private async Task ApplyAsync(Action change)
+    {
+        change();
+        _pageNumber = 1;
+        await LoadAsync();
+    }
+
+    private Task OnSearchAsync(string? v) => ApplyAsync(() => _search = v);
+    private Task OnStatusesAsync(IReadOnlyCollection<DocumentStatus> v) => ApplyAsync(() => _statuses = v);
+    private Task OnClientAsync(Guid? v) => ApplyAsync(() => _clientId = v);
+    private Task OnFromAsync(DateTime? v) => ApplyAsync(() => _from = v);
+    private Task OnToAsync(DateTime? v) => ApplyAsync(() => _to = v);
+    private Task OnCurrencyAsync(string? v) => ApplyAsync(() => _currency = v);
+    private Task OnOverdueAsync(bool v) => ApplyAsync(() => _overdueOnly = v);
+
+    private Task OnTabAsync(int index) => ApplyAsync(() =>
+    {
+        _tab = index;
+        _statuses = [];
+    });
+
+    private Task SortByAsync(DocumentListSort sort) => ApplyAsync(() =>
+    {
+        _descending = _sort == sort ? !_descending : sort is DocumentListSort.Issued or DocumentListSort.Amount;
+        _sort = sort;
+    });
+
+    private async Task PreviousAsync()
+    {
+        _pageNumber--;
+        await LoadAsync();
+    }
+
+    private async Task NextAsync()
+    {
+        _pageNumber++;
+        await LoadAsync();
+    }
+
+    private string? Sort(DocumentListSort sort) => _sort != sort ? null : _descending ? "descending" : "ascending";
+
+    private string PagingText()
+    {
+        var total = _page?.TotalCount ?? 0;
+        var first = total == 0 ? 0 : ((_pageNumber - 1) * PageSize) + 1;
+        return $"{first}–{Math.Min(_pageNumber * PageSize, total)} of {total}";
+    }
+
+    private async Task ExportAsync()
+    {
+        var all = await Sender.Send(new GetDocumentsQuery(BuildFilter(), 1, int.MaxValue));
+        if (all.IsFailure)
+        {
+            Snackbar.Add(all.Error.Message, Severity.Error);
+            return;
+        }
+
+        await Js.InvokeVoidAsync("ibDownload", $"{Kind}.csv", "text/csv;charset=utf-8", DocumentListCsv.Build(all.Value.Items));
+        Announcer.Announce("CSV exported");
+    }
+
+    private async Task DuplicateAsync(DocumentListRow row)
+    {
+        var result = await Sender.Send(new DuplicateDocumentCommand(row.Id));
+        if (result.IsFailure)
+        {
+            Snackbar.Add(result.Error.Message, Severity.Error);
+            return;
+        }
+
+        Snackbar.Add("Copy created as a new draft.", Severity.Success);
+        Nav.NavigateTo($"/{Kind}/{result.Value}");
+    }
+
+    private async Task ConvertAsync(DocumentListRow row)
+    {
+        var result = await Sender.Send(new ConvertQuoteToInvoiceCommand(row.Id));
+        if (result.IsFailure)
+        {
+            Snackbar.Add(result.Error.Message, Severity.Error);
+            return;
+        }
+
+        Snackbar.Add("Draft invoice created from the quote.", Severity.Success);
+        Nav.NavigateTo($"/invoices/{result.Value}");
+    }
+
+    private string DateText(DateOnly? d) => d is { } v ? Format.Date(new DateTimeOffset(v.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero)) : "—";
+
+    private static DateOnly? ToDateOnly(DateTime? d) => d is { } v ? DateOnly.FromDateTime(v) : null;
+
+    private static StatusKind PillKind(DocumentStatus s) => s switch
+    {
+        DocumentStatus.Draft => StatusKind.Draft,
+        DocumentStatus.Issued or DocumentStatus.Sent => StatusKind.Sent,
+        DocumentStatus.Viewed => StatusKind.Viewed,
+        DocumentStatus.PartPaid => StatusKind.PartPaid,
+        DocumentStatus.Paid => StatusKind.Paid,
+        DocumentStatus.Accepted or DocumentStatus.Converted => StatusKind.Accepted,
+        DocumentStatus.Declined => StatusKind.Declined,
+        DocumentStatus.Expired => StatusKind.Expired,
+        DocumentStatus.Void => StatusKind.Void,
+        _ => StatusKind.Draft,
+    };
+
+    private static string? PillLabel(DocumentStatus s) => s switch
+    {
+        DocumentStatus.Issued => "Issued",
+        DocumentStatus.Converted => "Converted",
+        _ => null,
+    };
+}

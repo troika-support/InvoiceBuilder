@@ -1,0 +1,245 @@
+using System.Globalization;
+using System.Threading.RateLimiting;
+using Hangfire;
+using InvoiceBuilder.Application;
+using InvoiceBuilder.Application.Options;
+using InvoiceBuilder.Application.Templates;
+using InvoiceBuilder.Infrastructure.Rendering;
+using InvoiceBuilder.Infrastructure;
+using InvoiceBuilder.Infrastructure.Persistence;
+using InvoiceBuilder.Web.Components;
+using InvoiceBuilder.Web.Security;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using MudBlazor.Services;
+using Serilog;
+
+Log.Logger = new LoggerConfiguration()
+	.WriteTo.Console(formatProvider: CultureInfo.InvariantCulture)
+	.CreateBootstrapLogger();
+
+try
+{
+	var builder = WebApplication.CreateBuilder(args);
+
+	builder.Host.UseSerilog((context, services, configuration) => configuration
+		.ReadFrom.Configuration(context.Configuration)
+		.ReadFrom.Services(services)
+		.Enrich.FromLogContext()
+		.Enrich.With<InvoiceBuilder.Web.Logging.RedactionEnricher>()
+		.WriteTo.Console(formatProvider: CultureInfo.InvariantCulture)
+		.WriteTo.Conditional(
+			_ => !string.IsNullOrWhiteSpace(context.Configuration["LogFile:Path"]),
+			sink => sink.File(
+				context.Configuration["LogFile:Path"] ?? "logs/invoice-builder-.log",
+				rollingInterval: RollingInterval.Day,
+				retainedFileTimeLimit: TimeSpan.FromDays(30),
+				formatProvider: CultureInfo.InvariantCulture,
+				outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {CorrelationId} {Message:lj}{NewLine}{Exception}")));
+
+	builder.Services.AddApplication();
+	builder.Services.AddOptions<AppOptions>().BindConfiguration(AppOptions.SectionName)
+		.ValidateDataAnnotations()
+		.Validate(o => builder.Environment.IsDevelopment() || !string.IsNullOrWhiteSpace(o.PublicBaseUrl), "App:PublicBaseUrl is required outside Development.")
+		.ValidateOnStart();
+	builder.Services.AddOptions<StorageOptions>().BindConfiguration(StorageOptions.SectionName)
+		.ValidateDataAnnotations().ValidateOnStart();
+	builder.Services.AddOptions<PaymentOptions>().BindConfiguration(PaymentOptions.SectionName)
+		.Validate(o => !o.UseFake || builder.Environment.IsDevelopment(), "Payments:UseFake may only be true in Development.")
+		.ValidateOnStart();
+	builder.Services.AddOptions<PdfOptions>().BindConfiguration(PdfOptions.SectionName)
+		.ValidateDataAnnotations().ValidateOnStart();
+	builder.Services.AddOptions<EmailOptions>().BindConfiguration(EmailOptions.SectionName)
+		.ValidateDataAnnotations()
+		.Validate(o => !string.Equals(o.Provider, "SendGrid", StringComparison.OrdinalIgnoreCase) || (!string.IsNullOrWhiteSpace(o.ApiKey) && !string.IsNullOrWhiteSpace(o.From)), "Email:ApiKey and Email:From are required for the SendGrid provider.")
+		.Validate(o => builder.Environment.IsDevelopment() || string.Equals(o.Provider, "SendGrid", StringComparison.OrdinalIgnoreCase), "Email:Provider must be SendGrid outside Development; the log-only sender would mark emails as sent without sending them.")
+		.ValidateOnStart();
+	builder.Services.AddOptions<WhatsAppOptions>().BindConfiguration(WhatsAppOptions.SectionName)
+		.ValidateDataAnnotations()
+		.Validate(o => !string.Equals(o.Provider, "Cloud", StringComparison.OrdinalIgnoreCase) || (!string.IsNullOrWhiteSpace(o.AppSecret) && !string.IsNullOrWhiteSpace(o.VerifyToken)), "WhatsApp:AppSecret and VerifyToken are required for the Cloud provider.")
+		.ValidateOnStart();
+	builder.Services.AddOptions<KeyRingOptions>().BindConfiguration(KeyRingOptions.SectionName)
+		.Validate(o => builder.Environment.IsDevelopment() || !string.IsNullOrWhiteSpace(o.KeysPath), "DataProtection:KeysPath is required outside Development.")
+		.ValidateOnStart();
+	var keysPath = builder.Configuration[$"{KeyRingOptions.SectionName}:{nameof(KeyRingOptions.KeysPath)}"];
+	if (!string.IsNullOrWhiteSpace(keysPath))
+	{
+		// Fixed key ring and app name so encrypted secrets and cookies survive restarts and app-pool recycles.
+		var protection = builder.Services.AddDataProtection()
+			.SetApplicationName("InvoiceBuilder")
+			.PersistKeysToFileSystem(new DirectoryInfo(keysPath));
+		if (OperatingSystem.IsWindows())
+		{
+			protection.ProtectKeysWithDpapi(protectToLocalMachine: true);
+		}
+	}
+
+	builder.Services.AddAppIdentity(builder.Environment);
+	InvoiceBuilder.Web.Health.HealthSetup.AddAppHealthChecks(builder.Services);
+	builder.Services.AddInfrastructure(builder.Configuration);
+	if (!builder.Environment.IsDevelopment()
+		&& !string.Equals(builder.Configuration[$"{WhatsAppOptions.SectionName}:{nameof(WhatsAppOptions.Provider)}"], "Cloud", StringComparison.OrdinalIgnoreCase))
+	{
+		// Outside Development an unconfigured WhatsApp channel fails messages visibly instead of pretending to send them.
+		builder.Services.Replace(Microsoft.Extensions.DependencyInjection.ServiceDescriptor.Singleton<InvoiceBuilder.Application.Messaging.IWhatsAppSender, InvoiceBuilder.Infrastructure.Email.DisabledWhatsAppSender>());
+	}
+
+	builder.Services.AddHangfire(config => config
+		.SetDataCompatibilityLevel(Hangfire.CompatibilityLevel.Version_180)
+		.UseSimpleAssemblyNameTypeSerializer()
+		.UseRecommendedSerializerSettings()
+		.UseSqlServerStorage(builder.Configuration.GetConnectionString(InvoiceBuilder.Infrastructure.DependencyInjection.ConnectionStringName)));
+	builder.Services.AddHangfireServer(options => options.Queues = ["pdf", "default"]);
+
+	builder.Services.AddRazorComponents()
+		.AddInteractiveServerComponents();
+	builder.Services.AddScoped<Microsoft.AspNetCore.Components.Authorization.AuthenticationStateProvider, RevalidatingIdentityStateProvider>();
+	builder.Services.AddScoped<InvoiceBuilder.Web.Services.ShellState>();
+	builder.Services.AddScoped<InvoiceBuilder.Web.Services.LiveAnnouncer>();
+	builder.Services.AddControllers();
+	builder.Services.AddRazorPages();
+	builder.Services.AddMudServices(options =>
+	{
+		options.SnackbarConfiguration.PositionClass = MudBlazor.Defaults.Classes.Position.BottomLeft;
+		options.SnackbarConfiguration.VisibleStateDuration = 4000;
+		options.SnackbarConfiguration.PreventDuplicates = false;
+	});
+	builder.Services.AddRateLimiter(options =>
+	{
+		options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+		options.AddPolicy(InvoiceBuilder.Web.Controllers.ClientLinkController.RateLimitPolicy, httpContext => RateLimitPartition.GetFixedWindowLimiter(httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ => new FixedWindowRateLimiterOptions { PermitLimit = 30, Window = TimeSpan.FromMinutes(1) }));
+		options.AddPolicy(AuthRateLimit.Policy, httpContext => HttpMethods.IsPost(httpContext.Request.Method)
+			? RateLimitPartition.GetFixedWindowLimiter(httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(1) })
+			: RateLimitPartition.GetNoLimiter("get"));
+		options.AddPolicy(InvoiceBuilder.Web.Controllers.PaynowWebhookController.RateLimitPolicy, httpContext =>
+			RateLimitPartition.GetFixedWindowLimiter(
+				httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+				_ => new FixedWindowRateLimiterOptions { PermitLimit = 60, Window = TimeSpan.FromMinutes(1) }));
+		options.AddPolicy(InvoiceBuilder.Web.Controllers.WhatsAppWebhookController.RateLimitPolicy, httpContext =>
+			RateLimitPartition.GetFixedWindowLimiter(
+				httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+				_ => new FixedWindowRateLimiterOptions { PermitLimit = 120, Window = TimeSpan.FromMinutes(1) }));
+	});
+
+	var app = builder.Build();
+
+	if (SeedOwnerCommand.Matches(args))
+	{
+		return await SeedOwnerCommand.RunAsync(app.Services, args);
+	}
+
+	if (app.Environment.IsDevelopment())
+	{
+		await using var scope = app.Services.CreateAsyncScope();
+		var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+		await db.Database.MigrateAsync();
+		await scope.ServiceProvider.GetRequiredService<DevDataSeeder>().SeedAsync();
+	}
+
+	if (!app.Environment.IsDevelopment())
+	{
+		app.UseExceptionHandler("/Error", createScopeForErrors: true);
+		app.UseHsts();
+	}
+
+	app.UseMiddleware<InvoiceBuilder.Web.Logging.CorrelationIdMiddleware>();
+	app.UseSerilogRequestLogging();
+	app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
+	app.UseHttpsRedirection();
+	app.Use(async (context, next) =>
+	{
+		// Baseline headers for every response. Client link pages (/d/...) set a stricter CSP of their own.
+		context.Response.OnStarting(() =>
+		{
+			var headers = context.Response.Headers;
+			headers.XContentTypeOptions = "nosniff";
+			headers.TryAdd("Referrer-Policy", "strict-origin-when-cross-origin");
+			headers.TryAdd("X-Frame-Options", "SAMEORIGIN");
+			if (!headers.ContainsKey("Content-Security-Policy"))
+			{
+				headers.ContentSecurityPolicy = context.Request.Path.StartsWithSegments("/d")
+					? "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+					: "frame-ancestors 'self'; object-src 'none'; base-uri 'self'";
+			}
+
+			return Task.CompletedTask;
+		});
+		await next();
+	});
+	app.UseRateLimiter();
+
+	app.UseAuthentication();
+	app.UseAuthorization();
+	app.Use(async (context, next) =>
+	{
+		if (TwoFactorGate.MustEnrol(context.User) && !TwoFactorGate.IsAllowedWhileEnrolling(context.Request.Path.Value ?? "/"))
+		{
+			context.Response.Redirect(TwoFactorGate.SetupPath);
+			return;
+		}
+
+		await next();
+	});
+	app.UseAntiforgery();
+
+	app.MapStaticAssets();
+	InvoiceBuilder.Web.Health.HealthSetup.MapAppHealthChecks(app);
+	app.MapControllers();
+	app.MapHangfireDashboard("/admin/jobs", new DashboardOptions
+	{
+		Authorization = [],
+		IsReadOnlyFunc = _ => true,
+		DashboardTitle = "Invoice Builder jobs",
+	}).RequireAuthorization(InvoiceBuilder.Web.Security.Policies.Owner);
+	app.MapRazorPages();
+	if (app.Environment.IsDevelopment())
+	{
+		app.MapGet("/dev/render-sample", async (int? lines, ITemplateRenderer renderer, IPdfRenderer pdf, CancellationToken ct) =>
+		{
+			var model = StudioBoldSample.Model(Math.Clamp(lines ?? 60, 1, 500));
+			var html = await renderer.RenderHtmlAsync(StudioBoldSample.WithFooter(), model, ct);
+			return Results.File(await pdf.RenderAsync(html, ct), "application/pdf");
+		});
+	}
+	app.MapRazorComponents<App>()
+		.AddInteractiveServerRenderMode();
+
+	app.Services.GetRequiredService<Hangfire.IRecurringJobManager>().AddOrUpdate<InvoiceBuilder.Infrastructure.Services.RemindersJob>(
+		"reminders",
+		j => j.RunAsync(CancellationToken.None),
+		"0 8 * * *",
+		new Hangfire.RecurringJobOptions { TimeZone = TimeZoneInfo.FindSystemTimeZoneById("Africa/Harare") });
+
+	app.Services.GetRequiredService<Hangfire.IRecurringJobManager>().AddOrUpdate<InvoiceBuilder.Infrastructure.Services.RecurringInvoicesJob>(
+		"recurring-invoices",
+		j => j.RunAsync(CancellationToken.None),
+		"0 6 * * *",
+		new Hangfire.RecurringJobOptions { TimeZone = TimeZoneInfo.FindSystemTimeZoneById("Africa/Harare") });
+
+	app.Services.GetRequiredService<Hangfire.IRecurringJobManager>().AddOrUpdate<InvoiceBuilder.Infrastructure.Services.ExpireQuotesJob>(
+		"expire-quotes",
+		j => j.RunAsync(CancellationToken.None),
+		"15 0 * * *",
+		new Hangfire.RecurringJobOptions { TimeZone = TimeZoneInfo.FindSystemTimeZoneById("Africa/Harare") });
+
+	app.Services.GetRequiredService<Hangfire.IRecurringJobManager>().AddOrUpdate<InvoiceBuilder.Infrastructure.Services.PollPendingPaymentsJob>(
+		"poll-pending-payments",
+		j => j.RunAsync(CancellationToken.None),
+		"*/2 * * * *",
+		new Hangfire.RecurringJobOptions { TimeZone = TimeZoneInfo.FindSystemTimeZoneById("Africa/Harare") });
+
+	app.Run();
+	return 0;
+}
+catch (Exception ex) when (ex is not HostAbortedException)
+{
+	Log.Fatal(ex, "Host terminated unexpectedly");
+	throw;
+}
+finally
+{
+	Log.CloseAndFlush();
+}
+
+public partial class Program;

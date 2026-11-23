@@ -1,0 +1,65 @@
+@* Business switcher in the sidebar header (design-system §7). Selection is saved, then the sign-in is refreshed so every query uses the new business. *@
+@inject InvoiceBuilder.Web.Services.ShellState Shell
+@inject NavigationManager Navigation
+
+@if (Shell.Info is { Businesses.Count: > 0 } info)
+{
+    <div class="ib-switcher">
+        <button type="button" class="ib-nav__link ib-nav__button ib-motion" aria-haspopup="true" aria-expanded="@(_open ? "true" : "false")"
+                aria-label="@($"Business: {Shell.Current?.Name ?? "none selected"}. Switch business")" @onclick="() => _open = !_open">
+            <span class="ib-switcher__tile" aria-hidden="true">@Initials(Shell.Current?.Name)</span>
+            @if (!Rail)
+            {
+                <span class="ib-switcher__text">
+                    <span class="ib-switcher__caption">Business</span>
+                    <span class="ib-switcher__name">@(Shell.Current?.Name ?? "Choose a business")</span>
+                </span>
+                <MudIcon Icon="@Icons.Material.Outlined.UnfoldMore" Size="Size.Small" aria-hidden="true" />
+            }
+        </button>
+        <MudPopover Open="_open" Fixed="true" AnchorOrigin="Origin.BottomLeft" TransformOrigin="Origin.TopLeft" Style="min-width:220px">
+            <div role="menu" aria-label="Switch business" style="display:flex; flex-direction:column; padding:4px">
+                @foreach (var business in info.Businesses)
+                {
+                    <button type="button" role="menuitem" class="ib-switcher__item" aria-current="@(business.Id == info.SelectedBusinessId ? "true" : null)"
+                            @onclick="() => SelectAsync(business.Id)">@business.Name</button>
+                }
+            </div>
+        </MudPopover>
+        <MudOverlay Visible="_open" OnClick="() => _open = false" />
+    </div>
+}
+
+@code {
+    [Parameter] public bool Rail { get; set; }
+
+    private bool _open;
+
+    private static string Initials(string? name) =>
+        string.IsNullOrWhiteSpace(name)
+            ? "?"
+            : string.Concat(name.Split(' ', StringSplitOptions.RemoveEmptyEntries).Take(2).Select(w => char.ToUpperInvariant(w[0])));
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Shell.Info is null)
+        {
+            await Shell.LoadAsync();
+        }
+    }
+
+    private async Task SelectAsync(Guid businessId)
+    {
+        _open = false;
+        if (businessId == Shell.Info?.SelectedBusinessId)
+        {
+            return;
+        }
+
+        if (await Shell.SelectBusinessAsync(businessId))
+        {
+            var returnUrl = "/" + Navigation.ToBaseRelativePath(Navigation.Uri);
+            Navigation.NavigateTo($"/account/refresh?returnUrl={Uri.EscapeDataString(returnUrl)}", forceLoad: true);
+        }
+    }
+}

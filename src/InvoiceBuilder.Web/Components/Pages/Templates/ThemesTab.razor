@@ -1,0 +1,214 @@
+@using InvoiceBuilder.Application.Templates
+@using MudBlazor.Utilities
+@inject MediatR.ISender Sender
+@inject ISnackbar Snackbar
+@inject IDialogService Dialogs
+
+@if (Themes is null)
+{
+    <p class="ib-help" role="status">Loading themes…</p>
+}
+else
+{
+    <p class="ib-help">Themes set the colours and fonts. Every template uses one theme, so editing a theme restyles all templates that use it.</p>
+    <MudSwitch T="bool" @bind-Value="_showArchived" Label="Show archived" Color="Color.Primary" />
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin:12px 0;" aria-label="Themes">
+        @foreach (var t in Themes.Where(x => _showArchived || !x.IsArchived))
+        {
+            var theme = t;
+            <MudPaper Outlined="true" Class="pa-3">
+                <div style="display:flex;gap:6px;margin-bottom:8px;" aria-hidden="true">
+                    @foreach (var key in new[] { "ink", "accent", "paper", "muted" })
+                    {
+                        <span style="width:28px;height:28px;border-radius:50%;border:1px solid #888;background:@theme.Tokens.GetValueOrDefault(key, "#CCCCCC");"></span>
+                    }
+                </div>
+                <strong>@theme.Name</strong>@(theme.IsArchived ? " (archived)" : "")
+                @if (theme.IsDefault)
+                {
+                    <MudChip T="string" Size="Size.Small">Default for new templates</MudChip>
+                }
+                <div class="ib-help">@FontText(theme)</div>
+                <div class="ib-help">Used by @theme.UsedByTemplates @(theme.UsedByTemplates == 1 ? "template" : "templates")</div>
+                <div style="margin-top:8px;">
+                    <MudButton Variant="Variant.Outlined" OnClick="@(() => Edit(theme))" aria-label="@($"Edit theme {theme.Name}")">Edit</MudButton>
+                    @if (!theme.IsDefault && !theme.IsArchived)
+                    {
+                        <MudButton Variant="Variant.Text" OnClick="@(() => ArchiveAsync(theme))" aria-label="@($"Archive theme {theme.Name}")">Archive</MudButton>
+                    }
+                    else if (theme.IsArchived)
+                    {
+                        <MudButton Variant="Variant.Text" OnClick="@(() => RestoreAsync(theme))" aria-label="@($"Restore theme {theme.Name}")">Restore</MudButton>
+                    }
+                    @if (theme.UsedByTemplates > 0)
+                    {
+                        <MudButton Variant="Variant.Text" OnClick="@(() => OnViewTemplates.InvokeAsync(theme.Id))">View templates</MudButton>
+                    }
+                </div>
+            </MudPaper>
+        }
+    </div>
+    <MudButton Variant="Variant.Outlined" OnClick="NewTheme">New theme</MudButton>
+    <MudButton Variant="Variant.Outlined" OnClick="FromLogoAsync">New theme from logo</MudButton>
+}
+
+@if (_editing)
+{
+    <div class="ib-designer__grid" style="margin-top:12px;max-width:520px;">
+        <MudTextField T="string" @bind-Value="_name" Label="Theme name" Variant="Variant.Outlined" Margin="Margin.Dense" />
+        <MudColorPicker @bind-Value="Ink" Label="Ink" Variant="Variant.Outlined" Margin="Margin.Dense" ColorPickerMode="ColorPickerMode.HEX" ShowAlpha="false" />
+        <MudColorPicker @bind-Value="Accent" Label="Accent" Variant="Variant.Outlined" Margin="Margin.Dense" ColorPickerMode="ColorPickerMode.HEX" ShowAlpha="false" />
+        <MudColorPicker @bind-Value="Paper" Label="Paper" Variant="Variant.Outlined" Margin="Margin.Dense" ColorPickerMode="ColorPickerMode.HEX" ShowAlpha="false" />
+        <MudColorPicker @bind-Value="Muted" Label="Muted" Variant="Variant.Outlined" Margin="Margin.Dense" ColorPickerMode="ColorPickerMode.HEX" ShowAlpha="false" />
+        <MudSelect T="string" @bind-Value="_headingFont" Label="Heading font" Variant="Variant.Outlined" Margin="Margin.Dense">
+            @foreach (var f in FontChoices(_headingFont))
+            {
+                <MudSelectItem T="string" Value="@f">@f</MudSelectItem>
+            }
+        </MudSelect>
+        <MudSelect T="string" @bind-Value="_bodyFont" Label="Body font" Variant="Variant.Outlined" Margin="Margin.Dense">
+            @foreach (var f in FontChoices(_bodyFont))
+            {
+                <MudSelectItem T="string" Value="@f">@f</MudSelectItem>
+            }
+        </MudSelect>
+    </div>
+    <p class="ib-help">Manrope and IBM Plex Mono are built into PDFs. Other fonts use the copy installed on the server and fall back to a generic sans-serif if it is missing.</p>
+    <ul class="ib-help" aria-live="polite" style="margin-top:8px;">
+        @foreach (var r in Live())
+        {
+            <li>@r.Text on @r.Background: @r.Ratio.ToString("0.0#"):1 — @(r.Level switch { ContrastLevel.Pass => "Passes", ContrastLevel.Warn => "Warning: below 4.5:1", _ => "Blocks publishing: below 3:1" })</li>
+        }
+    </ul>
+    <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveAsync">Save theme</MudButton>
+    <MudButton Variant="Variant.Outlined" OnClick="@(() => _editing = false)">Cancel</MudButton>
+}
+
+@code {
+    [Parameter]
+    public IReadOnlyList<ThemeItem>? Themes { get; set; }
+
+    [Parameter]
+    public EventCallback OnChanged { get; set; }
+
+    [Parameter]
+    public EventCallback<Guid> OnViewTemplates { get; set; }
+
+    private bool _editing;
+    private bool _showArchived;
+
+    private async Task ArchiveAsync(ThemeItem t)
+    {
+        var confirmed = await Dialogs.ShowMessageBoxAsync(
+            $"Archive {t.Name}?",
+            "It will be hidden from the theme list. Templates already using it keep their look.",
+            yesText: "Archive",
+            cancelText: "Cancel");
+        if (confirmed != true)
+        {
+            return;
+        }
+
+        await SendArchiveAsync(new ArchiveThemeCommand(t.Id), "Theme archived.");
+    }
+
+    private Task RestoreAsync(ThemeItem t) => SendArchiveAsync(new ArchiveThemeCommand(t.Id, false), "Theme restored.");
+
+    private async Task SendArchiveAsync(ArchiveThemeCommand command, string message)
+    {
+        var r = await Sender.Send(command);
+        if (r.IsFailure)
+        {
+            Snackbar.Add(r.Error.Message, Severity.Warning);
+            return;
+        }
+
+        Snackbar.Add(message, Severity.Success);
+        await OnChanged.InvokeAsync();
+    }
+    private Guid? _id;
+    private string _name = string.Empty, _ink = "#111111", _accent = "#F59E0B", _paper = "#FFFFFF", _muted = "#6B6B6B", _headingFont = "Manrope", _bodyFont = "Manrope";
+
+    private static string FontText(ThemeItem t) => $"{FontOf(t, "heading")} · {FontOf(t, "body")}";
+
+    private static string FontOf(ThemeItem t, string role) => t.Tokens.GetValueOrDefault($"fonts.{role}") ?? t.Tokens.GetValueOrDefault(role) ?? "Manrope";
+
+    private static readonly string[] Fonts =
+    [
+        "Manrope", "IBM Plex Mono", "Arial", "Calibri", "Courier New", "Georgia", "Segoe UI", "Tahoma", "Times New Roman", "Trebuchet MS", "Verdana",
+    ];
+
+    private static readonly System.Text.RegularExpressions.Regex Hex6 = new("^#[0-9A-Fa-f]{6}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+
+    private static IEnumerable<string> FontChoices(string current) =>
+        Fonts.Contains(current, StringComparer.Ordinal) || string.IsNullOrWhiteSpace(current) ? Fonts : [.. Fonts, current];
+
+    private static MudColor ToColor(string hex) => Hex6.IsMatch(hex) ? new MudColor(hex) : new MudColor("#000000");
+
+    private static string ToHex(MudColor c) => $"#{c.R:X2}{c.G:X2}{c.B:X2}";
+
+    private MudColor Ink { get => ToColor(_ink); set => _ink = ToHex(value); }
+
+    private MudColor Accent { get => ToColor(_accent); set => _accent = ToHex(value); }
+
+    private MudColor Paper { get => ToColor(_paper); set => _paper = ToHex(value); }
+
+    private MudColor Muted { get => ToColor(_muted); set => _muted = ToHex(value); }
+
+    private async Task FromLogoAsync()
+    {
+        var r = await Sender.Send(new SuggestThemeFromLogoQuery());
+        if (r.IsFailure)
+        {
+            Snackbar.Add(r.Error.Message, Severity.Warning);
+            return;
+        }
+
+        _id = null;
+        _name = "Theme from logo";
+        _ink = r.Value.Ink;
+        _accent = r.Value.Accent;
+        _muted = r.Value.Muted;
+        _paper = "#FFFFFF";
+        _editing = true;
+    }
+
+    private void NewTheme()
+    {
+        _id = null;
+        _name = string.Empty;
+        _editing = true;
+    }
+
+    private void Edit(ThemeItem t)
+    {
+        _id = t.Id;
+        _name = t.Name;
+        _ink = t.Tokens.GetValueOrDefault("ink", _ink);
+        _accent = t.Tokens.GetValueOrDefault("accent", _accent);
+        _paper = t.Tokens.GetValueOrDefault("paper", _paper);
+        _muted = t.Tokens.GetValueOrDefault("muted", _muted);
+        _headingFont = FontOf(t, "heading");
+        _bodyFont = FontOf(t, "body");
+        _editing = true;
+    }
+
+    private IReadOnlyList<ContrastResult> Live() => ThemeContrast.Check(new Dictionary<string, string>
+    {
+        ["ink"] = _ink, ["accent"] = _accent, ["paper"] = _paper, ["muted"] = _muted,
+    });
+
+    private async Task SaveAsync()
+    {
+        var r = await Sender.Send(new SaveThemeCommand(_id, _name, _ink, _accent, _paper, _muted, _headingFont, _bodyFont));
+        if (r.IsFailure)
+        {
+            Snackbar.Add(r.Error.Message, Severity.Error);
+            return;
+        }
+
+        _editing = false;
+        Snackbar.Add("Theme saved.", Severity.Success);
+        await OnChanged.InvokeAsync();
+    }
+}

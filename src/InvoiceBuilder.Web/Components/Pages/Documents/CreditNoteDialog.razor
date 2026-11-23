@@ -1,0 +1,71 @@
+@using InvoiceBuilder.Application.Payments
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Application.Abstractions.IDisplayFormatter Format
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+
+<MudDialog aria-labelledby="credit-title">
+    <TitleContent>
+        <h2 id="credit-title" class="ib-section-title">Issue a credit note for @Number</h2>
+    </TitleContent>
+    <DialogContent>
+        @if (_formError is not null)
+        {
+            <MudAlert Severity="Severity.Error" role="alert" Class="mb-4">@_formError</MudAlert>
+        }
+        <MudRadioGroup T="bool" @bind-Value="_full">
+            <MudRadio T="bool" Value="true" Color="Color.Primary">Credit the full invoice (@Format.Money(Total, Currency)). The invoice becomes Void.</MudRadio>
+            <MudRadio T="bool" Value="false" Color="Color.Primary">Credit part of it</MudRadio>
+        </MudRadioGroup>
+        @if (!_full)
+        {
+            <MudNumericField T="decimal" @bind-Value="_amount" Label="Amount to credit" Min="0m" Max="@Total" Format="N2" Variant="Variant.Outlined" Class="mt-2" />
+        }
+        <MudTextField @bind-Value="_reason" Label="Reason" Required="true" Lines="2" Variant="Variant.Outlined" Class="mt-3" HelperText="Shown on the credit note. Required." />
+    </DialogContent>
+    <DialogActions>
+        <MudButton Variant="Variant.Text" OnClick="Cancel" Disabled="_saving">Cancel</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveAsync" Disabled="_saving">Issue credit note</MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] private IMudDialogInstance Dialog { get; set; } = default!;
+
+    [Parameter] public Guid InvoiceId { get; set; }
+
+    [Parameter] public string Number { get; set; } = string.Empty;
+
+    [Parameter] public decimal Total { get; set; }
+
+    [Parameter] public string Currency { get; set; } = "USD";
+
+    private bool _full = true;
+    private decimal _amount;
+    private string _reason = string.Empty;
+    private string? _formError;
+    private bool _saving;
+
+    private void Cancel() => Dialog.Cancel();
+
+    private async Task SaveAsync()
+    {
+        _saving = true;
+        _formError = null;
+        try
+        {
+            var result = await Sender.Send(new IssueCreditNoteCommand(InvoiceId, _full ? null : _amount, _reason));
+            if (result.IsFailure)
+            {
+                _formError = result.Error.Message;
+                Announcer.Announce(result.Error.Message);
+                return;
+            }
+
+            Dialog.Close(DialogResult.Ok(result.Value));
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+}

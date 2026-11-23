@@ -1,0 +1,103 @@
+@* App frame: skip link, sidebar (full or rail), main region, theme mode (design-system §7). *@
+@inherits LayoutComponentBase
+@implements IDisposable
+@inject InvoiceBuilder.Web.Services.ShellState Shell
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+@inject NavigationManager Nav
+
+<MudThemeProvider @ref="_provider" Theme="IbTheme.Theme" IsDarkMode="_dark" />
+<MudPopoverProvider />
+<MudDialogProvider />
+<MudSnackbarProvider />
+
+<div class="ib-shell" data-theme="@(_dark ? "dark" : "light")">
+    <a class="ib-skip-link" href="#main">Skip to content</a>
+    <header class="ib-topbar">
+        <span class="ib-nav__mark" aria-hidden="true">IB</span>
+        <span class="ib-topbar__title">Invoice Builder</span>
+        <button type="button" class="ib-topbar__menu" aria-expanded="@(_navOpen ? "true" : "false")" aria-controls="ib-nav" @onclick="ToggleNav">
+            <MudIcon Icon="@(_navOpen ? Icons.Material.Outlined.Close : Icons.Material.Outlined.Menu)" aria-hidden="true" />
+            <span class="ib-visually-hidden">@(_navOpen ? "Close menu" : "Open menu")</span>
+        </button>
+    </header>
+    @if (Rail && _railExpanded)
+    {
+        <div class="ib-nav-spacer" aria-hidden="true"></div>
+    }
+    <SideNav Rail="Rail" Expanded="_railExpanded" OnToggleExpanded="ToggleRailExpanded" Open="_navOpen" Dark="_dark" OnToggleDark="ToggleDarkAsync" />
+    <main id="main" class="ib-main" tabindex="-1">
+        @Body
+    </main>
+    <div class="ib-visually-hidden" aria-live="polite" aria-atomic="true">@(LiveMessage ?? _announcement)</div>
+</div>
+
+@code {
+    private MudThemeProvider? _provider;
+    private bool _dark;
+    private bool _navOpen;
+    private bool _railExpanded;
+    private string? _announcement;
+
+    /// <summary>Editor and designer pages render the 72 px icon rail (DS 8.3, 8.4).</summary>
+    [CascadingParameter(Name = "UseRail")] public bool RailOverride { get; set; }
+
+    private bool Rail => RailOverride || IsRailRoute(Nav.ToBaseRelativePath(Nav.Uri));
+
+    private static bool IsRailRoute(string path)
+    {
+        var segments = path.Split('?', '#')[0].Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return segments is ["invoices" or "quotes", _, ..] || segments is ["templates", _, "design"];
+    }
+
+    /// <summary>Set by the announcer service for screen-reader messages (saved, sent, errors).</summary>
+    [CascadingParameter(Name = "LiveMessage")] public string? LiveMessage { get; set; }
+
+    protected override void OnInitialized()
+    {
+        Announcer.Announced += OnAnnounced;
+        Nav.LocationChanged += OnLocationChanged;
+    }
+
+    private void OnLocationChanged(object? sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs e) =>
+        _ = InvokeAsync(StateHasChanged);
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        await Shell.LoadAsync();
+        _dark = Shell.Info?.DarkMode ?? (_provider is not null && await _provider.GetSystemDarkModeAsync());
+        StateHasChanged();
+    }
+
+    private void ToggleNav() => _navOpen = !_navOpen;
+
+    private void ToggleRailExpanded()
+    {
+        _railExpanded = !_railExpanded;
+        Announcer.Announce(_railExpanded ? "Menu expanded" : "Menu collapsed");
+    }
+
+    private async Task ToggleDarkAsync()
+    {
+        _dark = !_dark;
+        await Shell.SetDarkModeAsync(_dark);
+        Announcer.Announce(_dark ? "Dark mode on" : "Dark mode off");
+    }
+
+    private void OnAnnounced(string message) =>
+        _ = InvokeAsync(() =>
+        {
+            _announcement = message;
+            StateHasChanged();
+        });
+
+    public void Dispose()
+    {
+        Announcer.Announced -= OnAnnounced;
+        Nav.LocationChanged -= OnLocationChanged;
+    }
+}

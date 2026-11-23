@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/InvoiceBuilder.Application/InvoiceBuilder.Application.csproj" />
+    <Project Path="src/InvoiceBuilder.Domain/InvoiceBuilder.Domain.csproj" />
+    <Project Path="src/InvoiceBuilder.Infrastructure/InvoiceBuilder.Infrastructure.csproj" />
+    <Project Path="src/InvoiceBuilder.Web/InvoiceBuilder.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/InvoiceBuilder.Application.Tests/InvoiceBuilder.Application.Tests.csproj" />
+    <Project Path="tests/InvoiceBuilder.Domain.Tests/InvoiceBuilder.Domain.Tests.csproj" />
+    <Project Path="tests/InvoiceBuilder.Integration.Tests/InvoiceBuilder.Integration.Tests.csproj" />
+  </Folder>
+</Solution>

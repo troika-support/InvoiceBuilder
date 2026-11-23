@@ -1,0 +1,148 @@
+using FluentValidation;
+using InvoiceBuilder.Application.Abstractions;
+using InvoiceBuilder.Application.Documents;
+using InvoiceBuilder.Application.Options;
+using InvoiceBuilder.Domain.Common;
+using InvoiceBuilder.Domain.Messaging;
+using MediatR;
+using Microsoft.Extensions.Options;
+
+namespace InvoiceBuilder.Application.Messaging;
+
+public sealed record EmailAttachment(string FileName, string ContentType, byte[] Content);
+
+public sealed record EmailMessage(string To, string Subject, string Html, string Text, EmailAttachment? Attachment = null, string? FromName = null, string? ReplyTo = null);
+
+/// <summary>Email with HTML, text and an optional PDF attachment (R28). The simple IEmailSender stays for password reset.</summary>
+public interface IRichEmailSender
+{
+    Task SendAsync(EmailMessage message, CancellationToken cancellationToken = default);
+}
+
+/// <summary>WhatsApp template message (R28). Parameters are positional: client name, document number, amount, link.</summary>
+public sealed record WhatsAppTemplateMessage(string To, string TemplateName, IReadOnlyList<string> Parameters, string? PhoneNumberId = null, string? AccessToken = null);
+
+public interface IWhatsAppSender
+{
+    /// <summary>Returns the provider message id.</summary>
+    Task<Result<string>> SendTemplateAsync(WhatsAppTemplateMessage message, CancellationToken cancellationToken = default);
+}
+
+public interface IOutboundMessageRepository
+{
+    void Add(OutboundMessage message);
+
+    Task<OutboundMessage?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<OutboundMessage>> ListForDocumentAsync(Guid documentId, CancellationToken cancellationToken = default);
+
+    /// <summary>Reviewed admin query: a provider webhook has no session, so query filters are skipped for this one lookup.</summary>
+    Task<OutboundMessage?> GetByProviderIdForWebhookAsync(MessageChannel channel, string providerMessageId, CancellationToken cancellationToken = default);
+}
+
+/// <summary>Queues one send per message (Hangfire). The raw link is a job argument only; it is never stored on the message.</summary>
+public interface IMessageJobScheduler
+{
+    void Enqueue(Guid messageId, string link, string? userMessage);
+}
+
+public sealed record SendDocumentCommand(Guid DocumentId, string? EmailTo, string? WhatsAppTo, string? Message, string? LinkToken, string? EmailTemplate = null) : IRequest<Result<int>>;
+
+public sealed class SendDocumentValidator : AbstractValidator<SendDocumentCommand>
+{
+    public SendDocumentValidator()
+    {
+        RuleFor(c => c).Must(c => !string.IsNullOrWhiteSpace(c.EmailTo) || !string.IsNullOrWhiteSpace(c.WhatsAppTo)).WithMessage("Choose at least one channel and recipient.");
+        RuleFor(c => c.EmailTo).EmailAddress().When(c => !string.IsNullOrWhiteSpace(c.EmailTo)).WithMessage("Enter a valid email address.");
+        RuleFor(c => c.Message).MaximumLength(1000);
+    }
+}
+
+public sealed record SendDocumentPrepared(string Link, IReadOnlyList<Guid> MessageIds);
+
+public sealed record PrepareSendCommand(Guid DocumentId, string? EmailTo, string? WhatsAppTo, string? LinkToken, string? EmailTemplate = null) : ITransactionalCommand<Result<SendDocumentPrepared>>;
+
+public static class MessageTemplates
+{
+    public const string Email = "document_email";
+
+    public const string DocumentLink = "document_link";
+
+    public const string PaymentReceipt = "payment_receipt";
+
+    public const string ReminderEmail = "reminder_email";
+
+    public const string InstalmentReminderEmail = "instalment_reminder_email";
+
+    public const string PlanRescheduledEmail = "plan_rescheduled_email";
+}
+
+public sealed class SendDocumentHandler(ISender sender, IMessageJobScheduler jobs) : IRequestHandler<SendDocumentCommand, Result<int>>
+{
+    public async Task<Result<int>> Handle(SendDocumentCommand request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var prepared = await sender.Send(new PrepareSendCommand(request.DocumentId, request.EmailTo, request.WhatsAppTo, request.LinkToken, request.EmailTemplate), cancellationToken);
+        if (prepared.IsFailure)
+        {
+            return Result.Failure<int>(prepared.Error);
+        }
+
+        foreach (var id in prepared.Value.MessageIds)
+        {
+            jobs.Enqueue(id, prepared.Value.Link, request.Message);
+        }
+
+        return Result.Success(prepared.Value.MessageIds.Count);
+    }
+}
+
+public sealed class PrepareSendHandler(
+    ICurrentBusiness currentBusiness,
+    IDocumentRepository documents,
+    IOutboundMessageRepository messages,
+    IActivityLog activity,
+    IOptions<AppOptions> app,
+    TimeProvider timeProvider) : IRequestHandler<PrepareSendCommand, Result<SendDocumentPrepared>>
+{
+    public async Task<Result<SendDocumentPrepared>> Handle(PrepareSendCommand request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var now = timeProvider.GetUtcNow();
+        var document = await documents.GetByIdAsync(request.DocumentId, cancellationToken);
+        if (document is null || document.Number is null || (currentBusiness.BusinessId is { } b && b != document.BusinessId))
+        {
+            return Result.Failure<SendDocumentPrepared>(new Error("Send.DocumentNotFound", "That document could not be found."));
+        }
+
+        var token = request.LinkToken;
+        if (string.IsNullOrEmpty(token) || ClientLinkToken.Hash(token) != document.LinkTokenHash)
+        {
+            token = ClientLinkToken.Generate();
+            var rotated = document.RotateLinkToken(ClientLinkToken.Hash(token), now);
+            if (rotated.IsFailure)
+            {
+                return Result.Failure<SendDocumentPrepared>(rotated.Error);
+            }
+        }
+
+        var baseUrl = (app.Value.PublicBaseUrl ?? "https://localhost").TrimEnd('/');
+        var ids = new List<Guid>();
+        if (!string.IsNullOrWhiteSpace(request.EmailTo))
+        {
+            var m = OutboundMessage.Queue(document.TenantId, document.BusinessId, document.Id, MessageChannel.Email, request.EmailTo, request.EmailTemplate ?? MessageTemplates.Email, now);
+            messages.Add(m);
+            ids.Add(m.Id);
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.WhatsAppTo))
+        {
+            var m = OutboundMessage.Queue(document.TenantId, document.BusinessId, document.Id, MessageChannel.WhatsApp, request.WhatsAppTo, MessageTemplates.DocumentLink, now);
+            messages.Add(m);
+            ids.Add(m.Id);
+        }
+
+        await activity.AddAsync(nameof(Domain.Documents.Document), document.Id, "SendQueued", $"{document.Number.Value} queued to send by {ids.Count} channel(s).", cancellationToken);
+        return Result.Success(new SendDocumentPrepared($"{baseUrl}/d/{token}", ids));
+    }
+}

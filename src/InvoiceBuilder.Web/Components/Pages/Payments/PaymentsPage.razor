@@ -1,0 +1,173 @@
+@page "/payments"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize(Policy = "Staff")]
+@using InvoiceBuilder.Application.Payments
+@using InvoiceBuilder.Domain.Payments
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Application.Abstractions.IDisplayFormatter Format
+@inject TimeProvider Clock
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+@inject ISnackbar Snackbar
+@inject IJSRuntime Js
+@inject Microsoft.Extensions.Options.IOptions<InvoiceBuilder.Application.Options.AppOptions> App
+
+<PageTitle>Payments · Invoice Builder</PageTitle>
+
+<div class="ib-page-header">
+    <div>
+        <h1 class="ib-page-title">Payments</h1>
+        <p class="ib-help" style="margin: 0;">@Format.MonthYear(_monthStart) · online payments confirm themselves; record cash and bank transfers here</p>
+    </div>
+    <div style="display: flex; gap: 8px; align-items: center;">
+        <MudSelect T="int" Value="_monthOffset" ValueChanged="OnPeriodAsync" Label="Period" Variant="Variant.Outlined" Dense="true" Style="min-width: 180px;">
+            @for (var i = 0; i < 12; i++)
+            {
+                <MudSelectItem T="int" Value="@i">@Format.MonthYear(MonthStart(i))</MudSelectItem>
+            }
+        </MudSelect>
+        <MudButton Variant="Variant.Outlined" Color="Color.Primary" OnClick="ExportAsync" Disabled="@(_rows is null || _rows.Count == 0)">Export CSV</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="() => _drawerOpen = true">Record a payment</MudButton>
+    </div>
+</div>
+
+@if (_loadError is not null)
+{
+    <EmptyState Title="@_loadError" Message="Add a business or pick one in the sidebar." />
+}
+else if (_rows is null)
+{
+    <MudProgressLinear Indeterminate="true" aria-label="Loading payments" />
+}
+else
+{
+    <section class="ib-card" aria-label="Received by method" style="padding: 20px; margin-bottom: 16px;">
+        <div style="display: flex; gap: 24px; flex-wrap: wrap;">
+            @foreach (var tile in Tiles())
+            {
+                <div>
+                    <div class="ib-help">@tile.Label</div>
+                    <div style="font: 600 1.5rem ui-monospace, Consolas, monospace;">@tile.Value</div>
+                </div>
+            }
+        </div>
+        @if (_zig > 0m)
+        {
+            <p class="ib-help" style="margin: 12px 0 0;">ZiG received — kept separate, not converted: <strong>@Format.Money(_zig, "ZWG")</strong></p>
+        }
+    </section>
+
+    <section class="ib-card" aria-label="Payments ledger" style="padding: 20px;">
+        @if (_rows.Count == 0)
+        {
+            <EmptyState Title="No payments this month" Message="Online payments appear here once they are made. Record cash or bank transfers with Record a payment." />
+        }
+        else
+        {
+            <div style="overflow-x: auto;">
+                <table class="ib-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">Date</th>
+                            <th scope="col">From · applied to</th>
+                            <th scope="col">Method</th>
+                            <th scope="col" class="ib-num">Amount</th>
+                            <th scope="col">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var row in _rows)
+                        {
+                            <tr>
+                                <td>@Format.ShortDate(row.PaidAt)</td>
+                                <td>@row.ClientName@(row.AppliedTo.Length > 0 ? " · " + row.AppliedTo : string.Empty)</td>
+                                <td>@MethodLabel(row.Method)</td>
+                                <td class="ib-num">@Format.Money(row.Amount, row.Currency)</td>
+                                <td><StatusPill Status="@StatusOf(row.Status)" /></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+}
+
+<RecordPaymentDrawer Open="_drawerOpen" OnClosed="OnDrawerClosedAsync" />
+
+@code {
+    private IReadOnlyList<LedgerRow>? _rows;
+    private string? _loadError;
+    private int _monthOffset;
+    private bool _drawerOpen;
+    private decimal _zig;
+    private DateTimeOffset _monthStart = default;
+
+    private DateTimeOffset MonthStart(int offset)
+    {
+        var now = Clock.GetUtcNow();
+        return new DateTimeOffset(now.Year, now.Month, 1, 0, 0, 0, TimeSpan.Zero).AddMonths(-offset);
+    }
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task OnPeriodAsync(int value)
+    {
+        _monthOffset = value;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _monthStart = MonthStart(_monthOffset);
+        var result = await Sender.Send(new GetPaymentLedgerQuery(_monthStart, _monthStart.AddMonths(1)));
+        if (result.IsFailure)
+        {
+            _loadError = result.Error.Message;
+            return;
+        }
+
+        _loadError = null;
+        _rows = result.Value;
+        _zig = _rows.Where(r => r.Status == PaymentStatus.Confirmed && r.Currency == "ZWG").Sum(r => r.Amount);
+    }
+
+    private IEnumerable<(string Label, string Value)> Tiles()
+    {
+        foreach (var method in Enum.GetValues<PaymentMethod>())
+        {
+            var total = _rows!.Where(r => r.Status == PaymentStatus.Confirmed && r.Method == method && r.Currency == "USD").Sum(r => r.Amount);
+            yield return (MethodLabel(method), Format.Money(total, "USD"));
+        }
+    }
+
+    private static string MethodLabel(PaymentMethod method) => method switch
+    {
+        PaymentMethod.BankTransfer => "Bank transfer",
+        PaymentMethod.OneMoney => "OneMoney",
+        PaymentMethod.InnBucks => "InnBucks",
+        _ => method.ToString(),
+    };
+
+    private static StatusKind StatusOf(PaymentStatus status) => status switch
+    {
+        PaymentStatus.Confirmed => StatusKind.Confirmed,
+        PaymentStatus.Failed => StatusKind.Failed,
+        _ => StatusKind.Pending,
+    };
+
+    private async Task OnDrawerClosedAsync(bool saved)
+    {
+        _drawerOpen = false;
+        if (saved)
+        {
+            Snackbar.Add("Payment recorded.", Severity.Success);
+            await LoadAsync();
+        }
+    }
+
+    private async Task ExportAsync()
+    {
+        var zone = TimeZoneInfo.FindSystemTimeZoneById(App.Value.TimeZone);
+        await Js.InvokeVoidAsync("ibDownload", $"payments-{_monthStart:yyyy-MM}.csv", "text/csv;charset=utf-8", PaymentLedgerCsv.Build(_rows!, zone));
+        Announcer.Announce("CSV exported");
+    }
+}

@@ -1,0 +1,22 @@
+@* Money in IBM Plex Mono, tabular figures, formatted by IDisplayFormatter (design-system §5.2). *@
+@inject IDisplayFormatter Formatter
+
+<span class="ib-money @Class" style="font-size:@SizePx; font-weight:@Weight">@Formatter.Money(Amount, Currency, ShowCurrency)</span>
+
+@code {
+    [Parameter, EditorRequired] public decimal Amount { get; set; }
+
+    /// <summary>ISO code "USD" or "ZWG" (shown as ZiG).</summary>
+    [Parameter, EditorRequired] public string Currency { get; set; } = "USD";
+
+    /// <summary>False for table cells where the currency is in the column head (e.g. 1,200.00).</summary>
+    [Parameter] public bool ShowCurrency { get; set; } = true;
+
+    /// <summary>S (14px), M (18px) or L (26px), per the type scale.</summary>
+    [Parameter] public string Size { get; set; } = "S";
+
+    [Parameter] public string? Class { get; set; }
+
+    private string SizePx => Size switch { "L" => "26px", "M" => "18px", _ => "14px" };
+    private string Weight => Size == "S" ? "500" : "600";
+}

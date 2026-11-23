@@ -1,0 +1,104 @@
+@using InvoiceBuilder.Application.Businesses.Settings
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+
+<MudDialog aria-labelledby="edit-member-title">
+    <TitleContent>
+        <h2 id="edit-member-title" class="ib-section-title">Edit @_originalName</h2>
+    </TitleContent>
+    <DialogContent>
+        @if (_formError is not null)
+        {
+            <MudAlert Severity="Severity.Error" role="alert" Class="mb-4">@_formError</MudAlert>
+        }
+        @if (_rows is null)
+        {
+            <MudProgressLinear Indeterminate="true" aria-label="Loading" />
+        }
+        else
+        {
+            <MudTextField @bind-Value="_name" Label="Name" Required="true" Variant="Variant.Outlined" AutoFocus="true" Error="@HasError("Name")" ErrorText="@ErrorFor("Name")" />
+            <fieldset style="border: 0; padding: 0; margin: 16px 0 0;">
+                <legend class="ib-card__title">Businesses this person can work in</legend>
+                @foreach (var row in _rows)
+                {
+                    <MudCheckBox T="bool" @bind-Value="row.Assigned" Label="@row.Name" />
+                }
+            </fieldset>
+        }
+    </DialogContent>
+    <DialogActions>
+        <MudButton Variant="Variant.Text" OnClick="Cancel" Disabled="_saving">Cancel</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveAsync" Disabled="@(_saving || _rows is null)">Save changes</MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] private IMudDialogInstance Dialog { get; set; } = default!;
+
+    [Parameter] public string UserId { get; set; } = "";
+
+    [Parameter] public string MemberName { get; set; } = "";
+
+    private sealed class Row
+    {
+        public Guid BusinessId { get; init; }
+
+        public string Name { get; init; } = "";
+
+        public bool Assigned { get; set; }
+    }
+
+    private List<Row>? _rows;
+    private string _name = "";
+    private string _originalName = "";
+    private string? _formError;
+    private bool _saving;
+    private IReadOnlyDictionary<string, string[]> _fieldErrors = new Dictionary<string, string[]>();
+
+    protected override async Task OnInitializedAsync()
+    {
+        _name = MemberName;
+        _originalName = MemberName;
+        var result = await Sender.Send(new GetTeamMemberAccessQuery(UserId));
+        if (result.IsFailure)
+        {
+            _formError = result.Error.Message;
+            _rows = [];
+            return;
+        }
+
+        _rows = result.Value.Select(r => new Row { BusinessId = r.BusinessId, Name = r.Name, Assigned = r.Assigned }).ToList();
+    }
+
+    private void Cancel() => Dialog.Cancel();
+
+    private async Task SaveAsync()
+    {
+        _saving = true;
+        _formError = null;
+        _fieldErrors = new Dictionary<string, string[]>();
+        try
+        {
+            var ids = _rows!.Where(r => r.Assigned).Select(r => r.BusinessId).ToList();
+            var result = await Sender.Send(new UpdateTeamMemberCommand(UserId, _name, ids));
+            if (result.IsFailure)
+            {
+                _fieldErrors = result.Error.FieldErrors ?? new Dictionary<string, string[]>();
+                _formError = result.Error.Message;
+                Announcer.Announce(result.Error.Message);
+                return;
+            }
+
+            Dialog.Close(DialogResult.Ok(true));
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private bool HasError(string field) => _fieldErrors.ContainsKey(field);
+
+    private string? ErrorFor(string field) => _fieldErrors.TryGetValue(field, out var messages) ? string.Join(" ", messages) : null;
+}

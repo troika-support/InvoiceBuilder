@@ -1,0 +1,136 @@
+using FluentValidation;
+using InvoiceBuilder.Application.Abstractions;
+using InvoiceBuilder.Domain.Common;
+using InvoiceBuilder.Domain.Documents;
+using InvoiceBuilder.Domain.Payments;
+using MediatR;
+
+namespace InvoiceBuilder.Application.Payments;
+
+/// <summary>Client taps "Pay with ..." (paynow.md section 3, steps 1-2). Amount null means the full balance.</summary>
+public sealed record StartOnlinePaymentCommand(
+    Guid DocumentId,
+    decimal? Amount,
+    PaymentMethod Method,
+    string? Phone,
+    string PayerEmail,
+    string? ClientToken = null,
+    bool IsNextInstalment = false) : ITransactionalCommand<Result<StartedPayment>>;
+
+public sealed record StartedPayment(
+    Guid PaymentId,
+    string Reference,
+    string? RedirectUrl,
+    string? Instructions,
+    string? AuthorizationCode = null,
+    string? AuthorizationExpires = null,
+    string? AuthorizationDeepLink = null);
+
+public sealed class StartOnlinePaymentValidator : AbstractValidator<StartOnlinePaymentCommand>
+{
+    public StartOnlinePaymentValidator()
+    {
+        RuleFor(c => c.DocumentId).NotEmpty();
+        RuleFor(c => c.Amount).GreaterThan(0m).When(c => c.Amount.HasValue);
+        RuleFor(c => c.PayerEmail).EmailAddress().When(c => !string.IsNullOrWhiteSpace(c.PayerEmail));
+        RuleFor(c => c.Method).Must(m => m is PaymentMethod.EcoCash or PaymentMethod.OneMoney or PaymentMethod.InnBucks or PaymentMethod.Card)
+            .WithMessage("Choose a Paynow payment method.");
+        RuleFor(c => c.Phone).NotEmpty().When(c => c.Method is PaymentMethod.EcoCash or PaymentMethod.OneMoney or PaymentMethod.InnBucks)
+            .WithMessage("A mobile number is required.");
+    }
+}
+
+public sealed class StartOnlinePaymentHandler(
+    IDocumentRepository documents,
+    IPaymentRepository payments,
+    IPaymentGateway gateway,
+    IBusinessRepository businesses,
+    IActivityLog activity,
+    TimeProvider timeProvider) : IRequestHandler<StartOnlinePaymentCommand, Result<StartedPayment>>
+{
+    public async Task<Result<StartedPayment>> Handle(StartOnlinePaymentCommand request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var now = timeProvider.GetUtcNow();
+
+        var invoice = await documents.GetByIdAsync(request.DocumentId, cancellationToken);
+        if (invoice is null || invoice.Type != DocumentType.Invoice || invoice.Number is null)
+        {
+            return Result.Failure<StartedPayment>(new Error("Payment.InvoiceNotFound", "That invoice could not be found."));
+        }
+
+        var credited = (await documents.ListCreditNotesAsync(invoice.Id, cancellationToken)).Sum(c => c.Total);
+        var paid = await payments.ConfirmedAllocatedTotalAsync(invoice.Id, cancellationToken);
+        var balance = PaymentAllocator.Balance(invoice.Total, credited, paid);
+        if (invoice.Status is DocumentStatus.Draft or DocumentStatus.Void or DocumentStatus.Paid || balance <= 0m)
+        {
+            return Result.Failure<StartedPayment>(new Error("Payment.NothingToPay", "This invoice has nothing left to pay."));
+        }
+
+        var amount = request.Amount ?? balance;
+        if (amount > balance)
+        {
+            return Result.Failure<StartedPayment>(new Error("Payment.AmountExceedsBalance", "The amount cannot be more than the balance."));
+        }
+
+        // R20 / R40: part payments need the business setting, except on plans where they are always allowed;
+        // "Pay next instalment" is exempt from the minimum, any other part amount must reach it.
+        var hasPlan = invoice.Instalments.Count > 0;
+        if (amount < balance && !(hasPlan && request.IsNextInstalment))
+        {
+            var business = await businesses.GetByIdAsync(invoice.BusinessId, cancellationToken);
+            if (business is null || (!hasPlan && !business.AllowPartPayments))
+            {
+                return Result.Failure<StartedPayment>(new Error("Payment.PartNotAllowed", "This invoice must be paid in full."));
+            }
+
+            var minimum = Math.Round(balance * business.MinPartPaymentPercent / 100m, 2, MidpointRounding.AwayFromZero);
+            if (amount < minimum)
+            {
+                return Result.Failure<StartedPayment>(new Error("Payment.BelowMinimum", $"The minimum payment is {minimum:0.00}."));
+            }
+        }
+
+        var reference = $"{invoice.Number.Value}-{Guid.NewGuid().ToString("N")[..6]}";
+        var created = Payment.Create(
+            invoice.TenantId, invoice.BusinessId, invoice.ClientId, amount, invoice.Currency, request.Method, reference, now, now);
+        if (created.IsFailure)
+        {
+            return Result.Failure<StartedPayment>(created.Error);
+        }
+
+        var payment = created.Value;
+
+        var allocated = PaymentAllocator.Allocate(
+            payment, [new AllocationRequest(invoice.Id, invoice.ClientId, invoice.Currency, balance, amount)]);
+        if (allocated.IsFailure)
+        {
+            return Result.Failure<StartedPayment>(allocated.Error);
+        }
+
+        var merchantEmail = (await businesses.GetByIdAsync(invoice.BusinessId, cancellationToken))?.Email;
+        var paymentRequest = new PaymentRequest(
+            invoice.BusinessId, payment.Id, reference, amount, invoice.Currency.ToString(), $"Invoice {invoice.Number.Value}", request.PayerEmail ?? string.Empty, request.ClientToken, merchantEmail);
+        var initiated = request.Method == PaymentMethod.Card
+            ? await gateway.InitiateWebAsync(paymentRequest, cancellationToken)
+            : await gateway.InitiateMobileAsync(paymentRequest, request.Phone!, ToMobile(request.Method), cancellationToken);
+        if (initiated.IsFailure)
+        {
+            return Result.Failure<StartedPayment>(initiated.Error);
+        }
+
+        payment.SetProviderDetails(null, initiated.Value.PollUrl, now);
+        payments.Add(payment);
+        await activity.AddAsync("Payment", payment.Id, "PaymentStarted", $"Online payment {reference} started for {invoice.Number.Value}.", cancellationToken);
+
+        var i = initiated.Value;
+        return Result.Success(new StartedPayment(payment.Id, reference, i.RedirectUrl, i.Instructions, i.AuthorizationCode, i.AuthorizationExpires, i.AuthorizationDeepLink));
+    }
+
+    private static MobileMethod ToMobile(PaymentMethod method) => method switch
+    {
+        PaymentMethod.OneMoney => MobileMethod.OneMoney,
+        PaymentMethod.InnBucks => MobileMethod.InnBucks,
+        _ => MobileMethod.EcoCash,
+    };
+}

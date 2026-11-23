@@ -1,0 +1,101 @@
+@using InvoiceBuilder.Application.Recurring
+@using InvoiceBuilder.Domain.Recurring
+@inject MediatR.ISender Sender
+@inject TimeProvider Clock
+
+<SidePanel Open="Open" Title="@(Existing is null ? "Make recurring" : "Edit schedule")" OnClose="CancelAsync">
+    <ChildContent>
+        @if (_error is not null)
+        {
+            <MudAlert Severity="Severity.Error" role="alert" Class="mb-4">@_error</MudAlert>
+        }
+        <div class="ib-form-stack">
+            <MudSelect T="RecurringCadence" @bind-Value="_cadence" Label="Repeats" Variant="Variant.Outlined">
+                <MudSelectItem Value="RecurringCadence.Weekly">Weekly</MudSelectItem>
+                <MudSelectItem Value="RecurringCadence.Monthly">Monthly</MudSelectItem>
+                <MudSelectItem Value="RecurringCadence.Quarterly">Quarterly</MudSelectItem>
+                <MudSelectItem Value="RecurringCadence.Yearly">Yearly</MudSelectItem>
+            </MudSelect>
+            <MudDatePicker @bind-Date="_start" Label="First run" Variant="Variant.Outlined" Disabled="@(Existing is not null)" />
+            <MudDatePicker @bind-Date="_end" Label="Ends on (optional)" Variant="Variant.Outlined" Clearable="true" />
+            <MudNumericField T="int?" @bind-Value="_max" Label="Stop after (occurrences, optional)" Variant="Variant.Outlined" Min="1" Clearable="true" />
+            <MudSwitch T="bool" @bind-Value="_autoIssue" Label="Issue automatically (otherwise create as draft)" Color="Color.Primary" />
+        </div>
+    </ChildContent>
+    <Actions>
+        <MudButton Variant="Variant.Text" OnClick="CancelAsync" Disabled="_saving">Cancel</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveAsync" Disabled="_saving">@(Existing is null ? "Start schedule" : "Save changes")</MudButton>
+    </Actions>
+</SidePanel>
+
+@code {
+    [Parameter] public bool Open { get; set; }
+
+    [Parameter] public RecurringRow? Existing { get; set; }
+
+    [Parameter] public Guid? SourceDocumentId { get; set; }
+
+    /// <summary>Raised with true when saved, false when cancelled.</summary>
+    [Parameter] public EventCallback<bool> OnClosed { get; set; }
+
+    private bool _wasOpen;
+    private bool _saving;
+    private string? _error;
+    private RecurringCadence _cadence = RecurringCadence.Monthly;
+    private DateTime? _start;
+    private DateTime? _end;
+    private int? _max;
+    private bool _autoIssue;
+
+    protected override void OnParametersSet()
+    {
+        if (Open && !_wasOpen)
+        {
+            _error = null;
+            _cadence = Existing?.Cadence ?? RecurringCadence.Monthly;
+            _start = Existing?.StartDate.ToDateTime(TimeOnly.MinValue) ?? Clock.GetUtcNow().AddHours(2).Date.AddDays(1);
+            _end = Existing?.EndDate?.ToDateTime(TimeOnly.MinValue);
+            _max = Existing?.MaxOccurrences;
+            _autoIssue = Existing?.AutoIssue ?? false;
+        }
+
+        _wasOpen = Open;
+    }
+
+    private Task CancelAsync() => _saving ? Task.CompletedTask : OnClosed.InvokeAsync(false);
+
+    private async Task SaveAsync()
+    {
+        _saving = true;
+        _error = null;
+        try
+        {
+            var end = _end is { } e ? DateOnly.FromDateTime(e) : (DateOnly?)null;
+            var result = Existing is { } existing
+                ? await Sender.Send(new UpdateRecurringCommand(existing.Id, _cadence, end, _max, _autoIssue))
+                : await StartAsync(end);
+            if (result.IsFailure)
+            {
+                _error = result.Error.Message;
+                return;
+            }
+
+            await OnClosed.InvokeAsync(true);
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task<InvoiceBuilder.Domain.Common.Result> StartAsync(DateOnly? end)
+    {
+        if (SourceDocumentId is not { } source || _start is not { } start)
+        {
+            return InvoiceBuilder.Domain.Common.Result.Failure(new InvoiceBuilder.Domain.Common.Error("Recurring.StartRequired", "Choose the first run date."));
+        }
+
+        var made = await Sender.Send(new MakeRecurringCommand(source, _cadence, DateOnly.FromDateTime(start), end, _max, _autoIssue));
+        return made.IsFailure ? InvoiceBuilder.Domain.Common.Result.Failure(made.Error) : InvoiceBuilder.Domain.Common.Result.Success();
+    }
+}

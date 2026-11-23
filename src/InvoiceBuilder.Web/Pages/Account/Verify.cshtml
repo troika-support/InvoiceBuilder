@@ -1,0 +1,17 @@
+@page "/account/verify"
+@model InvoiceBuilder.Web.Pages.Account.VerifyModel
+@{
+    ViewData["Title"] = "Verify it is you";
+}
+<h1>Enter your code</h1>
+<p>Use the code from your authenticator app, or a recovery code.</p>
+@if (Model.Error is not null)
+{
+    <p class="auth-error" role="alert">@Model.Error</p>
+}
+<form method="post">
+    <label class="auth-field">Code
+        <input asp-for="Code" autocomplete="one-time-code" required />
+    </label>
+    <button class="auth-button" type="submit">Verify</button>
+</form>

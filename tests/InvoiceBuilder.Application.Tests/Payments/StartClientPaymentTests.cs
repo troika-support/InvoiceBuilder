@@ -1,0 +1,81 @@
+using InvoiceBuilder.Application.Abstractions;
+using InvoiceBuilder.Application.Documents;
+using InvoiceBuilder.Application.Payments;
+using InvoiceBuilder.Domain.Common;
+using InvoiceBuilder.Domain.Documents;
+using InvoiceBuilder.Domain.Payments;
+using InvoiceBuilder.Domain.ValueObjects;
+using MediatR;
+using NSubstitute;
+
+namespace InvoiceBuilder.Application.Tests.Payments;
+
+public sealed class StartClientPaymentTests
+{
+    private static readonly DateTimeOffset Now = new(2026, 10, 23, 8, 0, 0, TimeSpan.Zero);
+    private readonly ISender _sender = Substitute.For<ISender>();
+    private readonly IDocumentRepository _documents = Substitute.For<IDocumentRepository>();
+    private readonly IScopeOverride _scope = Substitute.For<IScopeOverride>();
+    private readonly IPaymentGatewayConfigRepository _gateways = Substitute.For<IPaymentGatewayConfigRepository>();
+    private readonly IPaymentRepository _payments = Substitute.For<IPaymentRepository>();
+    private readonly IClientRepository _clients = Substitute.For<IClientRepository>();
+
+    private StartClientPaymentHandler Handler() => new(_sender, _documents, _scope, _gateways, _payments, _clients);
+
+    private Document PlanInvoice(string token)
+    {
+        var invoice = Document.CreateDraft(Guid.NewGuid(), Guid.NewGuid(), DocumentType.Invoice, Guid.NewGuid(), CurrencyCode.Usd, Now);
+        invoice.AddLine(new LineInput("Item", null, 1m, 100m, 0m, null), Now).IsSuccess.ShouldBeTrue();
+        invoice.SetPlan([new InstalmentDraft(InstalmentDueKind.Date, new DateOnly(2026, 11, 1), 40m), new InstalmentDraft(InstalmentDueKind.Date, new DateOnly(2026, 12, 1), 60m)], InstalmentFrequency.Monthly, Now).IsSuccess.ShouldBeTrue();
+        invoice.Issue(new IssueRequest(DocumentNumber.Create("INV-0001").Value, new DateOnly(2026, 10, 23), 14, "{}", "{}", Guid.NewGuid(), null, 14, ClientLinkToken.Hash(token)), Now).IsSuccess.ShouldBeTrue();
+        _documents.GetByLinkTokenHashAsync(ClientLinkToken.Hash(token), Arg.Any<CancellationToken>()).Returns(invoice);
+        _documents.ListCreditNotesAsync(invoice.Id, Arg.Any<CancellationToken>()).Returns([]);
+        _payments.ConfirmedAllocatedTotalAsync(invoice.Id, Arg.Any<CancellationToken>()).Returns(0m);
+        _gateways.GetForWebhookAsync(invoice.BusinessId, PaymentProvider.Paynow, Arg.Any<CancellationToken>()).Returns(PaymentGatewayConfig.Create(invoice.TenantId, invoice.BusinessId, PaymentProvider.Paynow, "1", "key", false, Now).Value);
+        _sender.Send(Arg.Any<StartOnlinePaymentCommand>(), Arg.Any<CancellationToken>()).Returns(Result.Success(new StartedPayment(Guid.NewGuid(), "ref", null, null)));
+        return invoice;
+    }
+
+    [Fact]
+    public async Task R40_next_instalment_pays_the_first_unpaid_instalment_and_carries_the_token()
+    {
+        var invoice = PlanInvoice("tok");
+        var result = await Handler().Handle(new StartClientPaymentCommand("tok", null, PaymentMethod.Card, null, "a@b.co", NextInstalment: true), CancellationToken.None);
+        result.IsSuccess.ShouldBeTrue();
+        await _sender.Received(1).Send(Arg.Is<StartOnlinePaymentCommand>(c => c.DocumentId == invoice.Id && c.Amount == 40m && c.ClientToken == "tok"), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task R26_unknown_token_cannot_start_a_payment()
+    {
+        var result = await Handler().Handle(new StartClientPaymentCommand("nope", null, PaymentMethod.Card, null, "a@b.co"), CancellationToken.None);
+        result.IsFailure.ShouldBeTrue();
+        result.Error.Code.ShouldBe(ClientLinkErrors.Invalid.Code);
+        await _sender.DidNotReceive().Send(Arg.Any<StartOnlinePaymentCommand>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Link_page_payment_without_an_email_uses_the_clients_email()
+    {
+        var invoice = PlanInvoice("tok2");
+        var client = InvoiceBuilder.Domain.Clients.Client.Create(invoice.TenantId, invoice.BusinessId, "Jane", CurrencyCode.Usd, Now).Value;
+        client.Update("Jane", CurrencyCode.Usd, "jane@example.com", null, null, null, null, Now).IsSuccess.ShouldBeTrue();
+        _clients.GetByIdAsync(invoice.ClientId, Arg.Any<CancellationToken>()).Returns(client);
+
+        var result = await Handler().Handle(new StartClientPaymentCommand("tok2", null, PaymentMethod.EcoCash, "0771234567", null), CancellationToken.None);
+
+        result.IsSuccess.ShouldBeTrue();
+        await _sender.Received(1).Send(Arg.Is<StartOnlinePaymentCommand>(c => c.PayerEmail == "jane@example.com"), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Link_page_payment_without_any_client_email_still_starts_and_leaves_the_email_to_the_gateway()
+    {
+        PlanInvoice("tok3");
+
+        var result = await Handler().Handle(new StartClientPaymentCommand("tok3", null, PaymentMethod.EcoCash, "0771234567", null), CancellationToken.None);
+
+        result.IsSuccess.ShouldBeTrue();
+        await _sender.Received(1).Send(Arg.Is<StartOnlinePaymentCommand>(c => c.PayerEmail == string.Empty), Arg.Any<CancellationToken>());
+    }
+}

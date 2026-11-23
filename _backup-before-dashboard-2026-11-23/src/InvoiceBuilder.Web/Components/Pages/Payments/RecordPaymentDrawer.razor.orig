@@ -1,0 +1,183 @@
+@using InvoiceBuilder.Application.Clients
+@using InvoiceBuilder.Application.Payments
+@using InvoiceBuilder.Domain.Payments
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Application.Abstractions.IDisplayFormatter Format
+@inject TimeProvider Clock
+
+<SidePanel Open="Open" Title="Record a payment" OnClose="CancelAsync">
+    <ChildContent>
+        @if (_formError is not null)
+        {
+            <MudAlert Severity="Severity.Error" role="alert" Class="mb-4">@_formError</MudAlert>
+        }
+        <div class="ib-form-stack">
+            <MudSelect T="Guid?" Value="_clientId" ValueChanged="OnClientAsync" Label="Client" Required="true" Variant="Variant.Outlined">
+                @foreach (var c in _clients)
+                {
+                    <MudSelectItem T="Guid?" Value="@((Guid?)c.Id)">@c.Name</MudSelectItem>
+                }
+            </MudSelect>
+            <MudNumericField T="decimal" Value="_amount" ValueChanged="OnAmountAsync" Label="Amount" Min="0m" Format="N2" Variant="Variant.Outlined" />
+            <MudDatePicker @bind-Date="_paidOn" Label="Date" Variant="Variant.Outlined" />
+            <MudSelect T="PaymentMethod" @bind-Value="_method" Label="Method" Variant="Variant.Outlined">
+                <MudSelectItem T="PaymentMethod" Value="PaymentMethod.Cash">Cash</MudSelectItem>
+                <MudSelectItem T="PaymentMethod" Value="PaymentMethod.BankTransfer">Bank transfer</MudSelectItem>
+                <MudSelectItem T="PaymentMethod" Value="PaymentMethod.Other">Other</MudSelectItem>
+            </MudSelect>
+
+            <fieldset style="border: 0; padding: 0; margin: 0;">
+                <legend class="ib-help">Apply to open invoices</legend>
+                @if (_clientId is null)
+                {
+                    <p class="ib-help">Choose a client to see their open invoices.</p>
+                }
+                else if (_open.Count == 0)
+                {
+                    <p class="ib-help">This client has no open invoices.</p>
+                }
+                else
+                {
+                    @foreach (var inv in _open)
+                    {
+                        var applied = _applied.GetValueOrDefault(inv.Id);
+                        <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 44px;">
+                            <span>@inv.Number · balance @Format.Money(inv.Balance, inv.Currency)</span>
+                            <MudNumericField T="decimal" Value="applied" ValueChanged="v => SetApplied(inv.Id, v)" Min="0m" Max="@inv.Balance" Format="N2" Variant="Variant.Outlined" Style="max-width: 130px;" aria-label="@($"Amount applied to {inv.Number}")" />
+                        </div>
+                    }
+                }
+            </fieldset>
+
+            @foreach (var line in Preview())
+            {
+                <p class="ib-help" style="margin: 0;">@line</p>
+            }
+
+            <MudCheckBox T="bool" @bind-Value="_sendWhatsApp" Color="Color.Primary" Label="Send receipt to client by WhatsApp" />
+        </div>
+    </ChildContent>
+    <Actions>
+        <MudButton Variant="Variant.Text" OnClick="CancelAsync" Disabled="_saving">Cancel</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveAsync" Disabled="_saving">Save payment</MudButton>
+    </Actions>
+</SidePanel>
+
+@code {
+    [Parameter] public bool Open { get; set; }
+
+    [Parameter] public EventCallback<bool> OnClosed { get; set; }
+
+    private IReadOnlyList<ClientListItem> _clients = [];
+    private IReadOnlyList<OpenInvoiceRow> _open = [];
+    private readonly Dictionary<Guid, decimal> _applied = [];
+    private Guid? _clientId;
+    private decimal _amount;
+    private DateTime? _paidOn;
+    private PaymentMethod _method = PaymentMethod.Cash;
+    private bool _sendWhatsApp;
+    private bool _saving;
+    private string? _formError;
+    private bool _loaded;
+    private string? _nextReceipt;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Open && !_loaded)
+        {
+            var page = await Sender.Send(new GetClientsQuery(null, ClientFilter.All, 1, int.MaxValue));
+            _clients = page.IsSuccess ? page.Value.Items : [];
+            _paidOn = Clock.GetUtcNow().UtcDateTime.Date;
+            _nextReceipt = (await Sender.Send(new GetNextReceiptNumberQuery())).Value;
+            _loaded = true;
+        }
+    }
+
+    private async Task OnClientAsync(Guid? id)
+    {
+        _clientId = id;
+        _applied.Clear();
+        _open = id is null ? [] : (await Sender.Send(new GetOpenInvoicesQuery(id.Value))).Value;
+        Redistribute();
+    }
+
+    private void OnAmountAsync(decimal value)
+    {
+        _amount = value;
+        Redistribute();
+    }
+
+    private void Redistribute()
+    {
+        _applied.Clear();
+        var left = _amount;
+        foreach (var inv in _open)
+        {
+            var take = Math.Min(left, inv.Balance);
+            if (take <= 0m)
+            {
+                break;
+            }
+
+            _applied[inv.Id] = take;
+            left -= take;
+        }
+    }
+
+    private void SetApplied(Guid id, decimal value) => _applied[id] = value;
+
+    private IEnumerable<string> Preview()
+    {
+        foreach (var inv in _open.Where(i => _applied.GetValueOrDefault(i.Id) > 0m))
+        {
+            var applied = _applied[inv.Id];
+            var receipt = _nextReceipt is null ? string.Empty : $" · Receipt {_nextReceipt}";
+            yield return applied >= inv.Balance ? $"{inv.Number} becomes Paid{receipt}" : $"{inv.Number} becomes Part-paid · {Format.Money(inv.Balance - applied, inv.Currency)} left{receipt}";
+            var covers = InstalmentCoverage.Describe(inv.InstalmentAmounts ?? [], inv.Paid, applied, v => Format.Money(v, inv.Currency));
+            if (covers is not null)
+            {
+                yield return covers;
+            }
+        }
+    }
+    private async Task SaveAsync()
+    {
+        _formError = null;
+        if (_clientId is null)
+        {
+            _formError = "Choose a client.";
+            return;
+        }
+
+        var allocations = _applied.Where(a => a.Value > 0m).Select(a => new ManualAllocation(a.Key, a.Value)).ToList();
+        _saving = true;
+        var result = await Sender.Send(new RecordManualPaymentCommand(_clientId.Value, _amount, DateOnly.FromDateTime(_paidOn ?? Clock.GetUtcNow().UtcDateTime), _method, allocations));
+        _saving = false;
+        if (result.IsFailure)
+        {
+            _formError = result.Error.Message;
+            return;
+        }
+
+        await Sender.Send(new InvoiceBuilder.Application.Messaging.SendReceiptCommand(result.Value.PaymentId, _sendWhatsApp));
+        Reset();
+        await OnClosed.InvokeAsync(true);
+    }
+
+    private async Task CancelAsync()
+    {
+        Reset();
+        await OnClosed.InvokeAsync(false);
+    }
+
+    private void Reset()
+    {
+        _clientId = null;
+        _amount = 0m;
+        _open = [];
+        _applied.Clear();
+        _sendWhatsApp = false;
+        _loaded = false;
+        _formError = null;
+    }
+}

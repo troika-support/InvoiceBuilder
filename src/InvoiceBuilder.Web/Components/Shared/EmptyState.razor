@@ -1,0 +1,20 @@
+@* Empty state: title, one line, one primary action (design-system §6). *@
+<div class="ib-empty" role="status">
+    <p class="ib-empty__title">@Title</p>
+    @if (!string.IsNullOrWhiteSpace(Message))
+    {
+        <p style="margin:0">@Message</p>
+    }
+    @if (!string.IsNullOrWhiteSpace(ActionText))
+    {
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" Href="@ActionHref" OnClick="OnAction" Class="ib-motion ib-motion-press" Style="margin-top:8px">@ActionText</MudButton>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string Title { get; set; } = "";
+    [Parameter] public string? Message { get; set; }
+    [Parameter] public string? ActionText { get; set; }
+    [Parameter] public string? ActionHref { get; set; }
+    [Parameter] public EventCallback OnAction { get; set; }
+}

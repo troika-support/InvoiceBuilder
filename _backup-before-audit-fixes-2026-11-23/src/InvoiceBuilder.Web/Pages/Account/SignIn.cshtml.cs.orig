@@ -1,0 +1,52 @@
+using System.ComponentModel.DataAnnotations;
+using InvoiceBuilder.Infrastructure.Persistence;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.RazorPages;
+
+namespace InvoiceBuilder.Web.Pages.Account;
+
+[AllowAnonymous]
+public sealed class SignInModel(SignInManager<AppUser> signIn, UserManager<AppUser> users) : PageModel
+{
+    [BindProperty, Required, EmailAddress]
+    public string Email { get; set; } = string.Empty;
+
+    [BindProperty, Required]
+    public string Password { get; set; } = string.Empty;
+
+    public string? Error { get; private set; }
+
+    public bool SetupOpen { get; private set; }
+
+    public async Task OnGetAsync(CancellationToken cancellationToken)
+    {
+        SetupOpen = await SetupModel.IsSetupOpenAsync(users, cancellationToken);
+    }
+
+    public async Task<IActionResult> OnPostAsync()
+    {
+        if (!ModelState.IsValid)
+        {
+            Error = "Enter your email and password.";
+            return Page();
+        }
+
+        var result = await signIn.PasswordSignInAsync(Email, Password, true, true);
+        if (result.Succeeded)
+        {
+            return LocalRedirect("/");
+        }
+
+        if (result.RequiresTwoFactor)
+        {
+            return RedirectToPage("/Account/Verify");
+        }
+
+        Error = result.IsLockedOut
+            ? "Too many attempts. Try again in 15 minutes."
+            : "Email or password is incorrect.";
+        return Page();
+    }
+}

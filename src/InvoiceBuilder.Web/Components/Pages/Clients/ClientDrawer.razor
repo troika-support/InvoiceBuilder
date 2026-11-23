@@ -1,0 +1,121 @@
+@using InvoiceBuilder.Application.Clients
+@using InvoiceBuilder.Domain.Common
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+
+<SidePanel Open="Open" Title="@(Existing is null ? "New client" : "Edit client")" OnClose="CancelAsync">
+    <ChildContent>
+        @if (_formError is not null)
+        {
+            <MudAlert Severity="Severity.Error" role="alert" Class="mb-4">@_formError</MudAlert>
+        }
+        <div class="ib-form-stack">
+            <MudTextField @bind-Value="_name" Label="Name" Required="true" Variant="Variant.Outlined"
+                          Error="@HasError("Input.Name")" ErrorText="@ErrorFor("Input.Name")" />
+            <MudTextField @bind-Value="_email" Label="Email" InputType="InputType.Email" Variant="Variant.Outlined"
+                          Error="@HasError("Input.Email")" ErrorText="@ErrorFor("Input.Email")" />
+            <MudTextField @bind-Value="_phone" Label="Phone" InputType="InputType.Telephone" Variant="Variant.Outlined" />
+            <MudTextField @bind-Value="_whatsApp" Label="WhatsApp number" InputType="InputType.Telephone" Variant="Variant.Outlined" />
+            <MudSelect T="string" @bind-Value="_currency" Label="Pays in" Variant="Variant.Outlined">
+                <MudSelectItem Value="@("USD")">USD</MudSelectItem>
+                <MudSelectItem Value="@("ZWG")">ZiG</MudSelectItem>
+            </MudSelect>
+            <MudTextField @bind-Value="_address" Label="Address" Lines="3" Variant="Variant.Outlined" />
+            <MudTextField @bind-Value="_notes" Label="Notes" Lines="3" Variant="Variant.Outlined" />
+        </div>
+    </ChildContent>
+    <Actions>
+        <MudButton Variant="Variant.Text" OnClick="CancelAsync" Disabled="_saving">Cancel</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveAsync" Disabled="_saving">@(Existing is null ? "Add client" : "Save changes")</MudButton>
+    </Actions>
+</SidePanel>
+
+@code {
+    [Parameter] public bool Open { get; set; }
+
+    [Parameter] public ClientDetail? Existing { get; set; }
+
+    /// <summary>Raised with the saved client's id, or null when cancelled.</summary>
+    [Parameter] public EventCallback<Guid?> OnClosed { get; set; }
+
+    private bool _wasOpen;
+    private string _name = "";
+    private string? _email;
+    private string? _phone;
+    private string? _whatsApp;
+    private string? _address;
+    private string? _notes;
+    private string _currency = "USD";
+    private string? _formError;
+    private bool _saving;
+    private IReadOnlyDictionary<string, string[]> _fieldErrors = new Dictionary<string, string[]>();
+
+    protected override void OnParametersSet()
+    {
+        if (Open && !_wasOpen)
+        {
+            Reset();
+        }
+
+        _wasOpen = Open;
+    }
+
+    private void Reset()
+    {
+        _formError = null;
+        _fieldErrors = new Dictionary<string, string[]>();
+        _name = Existing?.Name ?? "";
+        _email = Existing?.Email;
+        _phone = Existing?.Phone;
+        _whatsApp = Existing?.WhatsApp;
+        _address = Existing?.Address;
+        _notes = Existing?.Notes;
+        _currency = Existing?.DefaultCurrency ?? "USD";
+    }
+
+    private Task CancelAsync() => _saving ? Task.CompletedTask : OnClosed.InvokeAsync(null);
+
+    private async Task SaveAsync()
+    {
+        _saving = true;
+        _formError = null;
+        _fieldErrors = new Dictionary<string, string[]>();
+        try
+        {
+            var input = new ClientInput(_name, _currency, _email, _phone, _whatsApp, _address, _notes);
+            Error? error;
+            Guid id;
+            if (Existing is null)
+            {
+                var created = await Sender.Send(new CreateClientCommand(input));
+                error = created.IsFailure ? created.Error : null;
+                id = created.IsSuccess ? created.Value : Guid.Empty;
+            }
+            else
+            {
+                var updated = await Sender.Send(new UpdateClientCommand(Existing.Id, input));
+                error = updated.IsFailure ? updated.Error : null;
+                id = Existing.Id;
+            }
+
+            if (error is not null)
+            {
+                _fieldErrors = error.FieldErrors ?? new Dictionary<string, string[]>();
+                _formError = error.Message;
+                Announcer.Announce(error.Message);
+                return;
+            }
+
+            _saving = false;
+            await OnClosed.InvokeAsync(id);
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private bool HasError(string field) => _fieldErrors.ContainsKey(field);
+
+    private string? ErrorFor(string field) => _fieldErrors.TryGetValue(field, out var messages) ? string.Join(" ", messages) : null;
+}

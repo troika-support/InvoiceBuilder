@@ -1,0 +1,41 @@
+@* Status pill: dot + word, never colour alone (design-system §2.2, §5.3). *@
+<span class="ib-pill ib-pill--@Tone">
+    <span class="ib-pill__dot @(Hollow ? "ib-pill__dot--hollow" : null)" aria-hidden="true"></span>@Text
+</span>
+
+@code {
+    [Parameter, EditorRequired] public StatusKind Status { get; set; }
+
+    /// <summary>Optional override, e.g. "Waiting for Paynow" or "9 days late".</summary>
+    [Parameter] public string? Label { get; set; }
+
+    private string Text => Label ?? Status switch
+    {
+        StatusKind.Draft => "Draft",
+        StatusKind.Sent => "Sent",
+        StatusKind.Viewed => "Viewed",
+        StatusKind.Accepted => "Accepted",
+        StatusKind.Declined => "Declined",
+        StatusKind.Expired => "Expired",
+        StatusKind.PartPaid => "Part-paid",
+        StatusKind.Paid => "Paid",
+        StatusKind.Overdue => "Overdue",
+        StatusKind.Pending => "Waiting for Paynow",
+        StatusKind.Confirmed => "Confirmed",
+        StatusKind.Failed => "Failed",
+        StatusKind.Void => "Void",
+        _ => Status.ToString(),
+    };
+
+    private string Tone => Status switch
+    {
+        StatusKind.Draft or StatusKind.Expired or StatusKind.Void => "draft",
+        StatusKind.Sent or StatusKind.Viewed => "info",
+        StatusKind.Accepted => "accept",
+        StatusKind.PartPaid or StatusKind.Pending => "warn",
+        StatusKind.Paid or StatusKind.Confirmed => "ok",
+        _ => "bad",
+    };
+
+    private bool Hollow => Status is StatusKind.Expired or StatusKind.Void;
+}

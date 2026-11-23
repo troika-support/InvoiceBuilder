@@ -1,0 +1,129 @@
+using InvoiceBuilder.Domain.Businesses;
+using InvoiceBuilder.Domain.Catalogue;
+using InvoiceBuilder.Domain.Clients;
+using InvoiceBuilder.Domain.Documents;
+using InvoiceBuilder.Domain.Payments;
+using InvoiceBuilder.Domain.Templates;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+namespace InvoiceBuilder.Infrastructure.Persistence.Configurations;
+
+public sealed class DocumentConfiguration : IEntityTypeConfiguration<Document>
+{
+    public void Configure(EntityTypeBuilder<Document> builder)
+    {
+        builder.ToTable("Documents");
+
+        builder.Property(d => d.ClientSnapshot).HasColumnType("nvarchar(max)");
+        builder.Property(d => d.BusinessSnapshot).HasColumnType("nvarchar(max)");
+        AppDbContext.RequireJson(builder, nameof(Document.ClientSnapshot));
+        AppDbContext.RequireJson(builder, nameof(Document.BusinessSnapshot));
+
+        builder.Property(d => d.LinkTokenHash).HasMaxLength(64).IsUnicode(false);
+        builder.HasIndex(d => d.LinkTokenHash).IsUnique().HasFilter("[LinkTokenHash] IS NOT NULL");
+        builder.Property(d => d.LinkTokenProtected).HasMaxLength(512).IsUnicode(false);
+        builder.Property(d => d.ExchangeRate).HasPrecision(18, 4);
+        builder.Property(d => d.Notes).HasMaxLength(4000);
+        builder.Property(d => d.Terms).HasMaxLength(4000);
+        builder.Property(d => d.CreditReason).HasMaxLength(1000);
+        builder.Property(d => d.AllowedPaymentMethods).HasDefaultValue(AllowedPaymentMethods.All).HasSentinel(AllowedPaymentMethods.None);
+
+        builder.ComplexProperty(d => d.Discount, discount =>
+        {
+            discount.Property(x => x.Kind).HasColumnName("DiscountKind");
+            discount.Property(x => x.Value).HasColumnName("DiscountValue").HasPrecision(18, 4);
+        });
+
+        builder.HasMany(d => d.Lines).WithOne().HasForeignKey(l => l.DocumentId).OnDelete(DeleteBehavior.Cascade);
+        builder.Navigation(d => d.Lines).UsePropertyAccessMode(PropertyAccessMode.Field);
+        builder.HasMany(d => d.Instalments).WithOne().HasForeignKey(i => i.DocumentId).OnDelete(DeleteBehavior.Cascade);
+        builder.Navigation(d => d.Instalments).UsePropertyAccessMode(PropertyAccessMode.Field);
+        builder.HasOne(d => d.Acceptance).WithOne().HasForeignKey<QuoteAcceptance>(a => a.DocumentId).OnDelete(DeleteBehavior.Cascade);
+
+        builder.HasOne<Client>().WithMany().HasForeignKey(d => d.ClientId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<Document>().WithMany().HasForeignKey(d => d.SourceDocumentId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<TemplateVersion>().WithMany().HasForeignKey(d => d.TemplateVersionId).OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasIndex(d => new { d.BusinessId, d.Type, d.Number })
+            .IsUnique()
+            .HasFilter("[Number] IS NOT NULL");
+        builder.HasIndex(d => new { d.BusinessId, d.ClientId });
+    }
+}
+
+public sealed class DocumentLineConfiguration : IEntityTypeConfiguration<DocumentLine>
+{
+    public void Configure(EntityTypeBuilder<DocumentLine> builder)
+    {
+        builder.ToTable("DocumentLines");
+        builder.Property(l => l.Description).HasMaxLength(500);
+        builder.Property(l => l.Detail).HasMaxLength(2000);
+        builder.Property(l => l.Quantity).HasPrecision(18, 3);
+        builder.Property(l => l.TaxPercentSnapshot).HasPrecision(18, 4);
+        builder.HasOne<TaxRate>().WithMany().HasForeignKey(l => l.TaxRateId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<CatalogueItem>().WithMany().HasForeignKey(l => l.CatalogueItemId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasIndex(l => new { l.DocumentId, l.Position }).IsUnique();
+    }
+}
+
+public sealed class InstalmentConfiguration : IEntityTypeConfiguration<Instalment>
+{
+    public void Configure(EntityTypeBuilder<Instalment> builder)
+    {
+        builder.ToTable("Instalments");
+        builder.Property(i => i.Amount).HasPrecision(18, 2);
+        builder.Property(i => i.Note).HasMaxLength(500);
+        builder.HasIndex(i => new { i.DocumentId, i.Position }).IsUnique();
+    }
+}
+
+public sealed class QuoteAcceptanceConfiguration : IEntityTypeConfiguration<QuoteAcceptance>
+{
+    public void Configure(EntityTypeBuilder<QuoteAcceptance> builder)
+    {
+        builder.ToTable("QuoteAcceptances");
+        builder.Property(a => a.Ip).HasMaxLength(64);
+        builder.Property(a => a.UserAgent).HasMaxLength(500);
+        builder.Property(a => a.Comment).HasMaxLength(1000);
+        builder.HasIndex(a => a.DocumentId).IsUnique();
+    }
+}
+
+public sealed class PaymentGatewayConfigConfiguration : IEntityTypeConfiguration<PaymentGatewayConfig>
+{
+    public void Configure(EntityTypeBuilder<PaymentGatewayConfig> builder)
+    {
+        builder.ToTable("PaymentGatewayConfigs");
+        builder.Property(c => c.IntegrationId).HasMaxLength(100);
+        builder.Property(c => c.IntegrationKeyEncrypted).HasMaxLength(2000);
+        builder.HasIndex(c => new { c.BusinessId, c.Provider }).IsUnique();
+    }
+}
+
+public sealed class PaymentConfiguration : IEntityTypeConfiguration<Payment>
+{
+    public void Configure(EntityTypeBuilder<Payment> builder)
+    {
+        builder.ToTable("Payments");
+        builder.Property(p => p.PollUrl).HasMaxLength(1000);
+        builder.Property(p => p.ReviewReason).HasMaxLength(500);
+        builder.HasIndex(p => new { p.BusinessId, p.Reference }).IsUnique();
+        builder.HasMany(p => p.Allocations).WithOne().HasForeignKey(a => a.PaymentId).OnDelete(DeleteBehavior.Cascade);
+        builder.Navigation(p => p.Allocations).UsePropertyAccessMode(PropertyAccessMode.Field);
+        builder.HasOne<Client>().WithMany().HasForeignKey(p => p.ClientId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasIndex(p => new { p.BusinessId, p.ProviderReference })
+            .IsUnique()
+            .HasFilter("[ProviderReference] IS NOT NULL");
+    }
+}
+
+public sealed class PaymentAllocationConfiguration : IEntityTypeConfiguration<PaymentAllocation>
+{
+    public void Configure(EntityTypeBuilder<PaymentAllocation> builder)
+    {
+        builder.ToTable("PaymentAllocations");
+        builder.HasOne<Document>().WithMany().HasForeignKey(a => a.DocumentId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasIndex(a => new { a.PaymentId, a.DocumentId }).IsUnique();
+    }
+}

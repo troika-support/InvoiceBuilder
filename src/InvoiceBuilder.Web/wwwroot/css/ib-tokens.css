@@ -1,0 +1,130 @@
+/* Invoice Builder — design tokens (docs/design-system.md §2–§4). Verified for WCAG AAA text contrast. */
+
+@font-face { font-family: "Manrope"; font-weight: 400; font-display: swap; src: url("../fonts/manrope-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Manrope"; font-weight: 500; font-display: swap; src: url("../fonts/manrope-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "Manrope"; font-weight: 600; font-display: swap; src: url("../fonts/manrope-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Manrope"; font-weight: 700; font-display: swap; src: url("../fonts/manrope-latin-700-normal.woff2") format("woff2"); }
+@font-face { font-family: "Manrope"; font-weight: 800; font-display: swap; src: url("../fonts/manrope-latin-800-normal.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Mono"; font-weight: 400; font-display: swap; src: url("../fonts/ibm-plex-mono-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Mono"; font-weight: 500; font-display: swap; src: url("../fonts/ibm-plex-mono-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Mono"; font-weight: 600; font-display: swap; src: url("../fonts/ibm-plex-mono-latin-600-normal.woff2") format("woff2"); }
+
+:root {
+  --ib-font: "Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --ib-font-mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+
+  --ib-bg: #F4F5F7;
+  --ib-surface: #FFFFFF;
+  --ib-surface-2: #F1F5F9;
+  --ib-border: #E2E6EB;
+  --ib-border-strong: #D5DAE1;
+  --ib-text: #0F172A;
+  --ib-text-2: #334155;
+  --ib-muted: #434E60;
+  --ib-primary: #115E59;
+  --ib-on-primary: #FFFFFF;
+  --ib-primary-soft: #E6F4F2;
+  --ib-primary-soft-text: #0B4F4A;
+  --ib-danger: #991B1B;
+  --ib-success: #166534;
+  --ib-nav-bg: #0F172A;
+  --ib-nav-text: #CBD5E1;
+  --ib-nav-muted: #A9B4C4;
+  --ib-nav-active-bg: #134E4A;
+  --ib-brand-mark: #14B8A6;
+  --ib-chart: #99D5CF;
+  --ib-chart-current: #115E59;
+
+  /* status: bg / text / dot */
+  --ib-st-draft-bg: #E2E8F0;    --ib-st-draft-fg: #1E293B;    --ib-st-draft-dot: #475569;
+  --ib-st-info-bg: #DBEAFE;     --ib-st-info-fg: #1E3A8A;     --ib-st-info-dot: #1D4ED8;
+  --ib-st-accept-bg: #CCFBF1;   --ib-st-accept-fg: #134E4A;   --ib-st-accept-dot: #0F766E;
+  --ib-st-warn-bg: #FEF3C7;     --ib-st-warn-fg: #78350F;     --ib-st-warn-dot: #B45309;
+  --ib-st-ok-bg: #DCFCE7;       --ib-st-ok-fg: #14532D;       --ib-st-ok-dot: #15803D;
+  --ib-st-bad-bg: #FEE2E2;      --ib-st-bad-fg: #7F1D1D;      --ib-st-bad-dot: #B91C1C;
+
+  --ib-radius-control: 10px;
+  --ib-radius-card: 14px;
+  --ib-radius-chip: 6px;
+  --ib-shadow-float: 0 12px 32px rgba(15, 23, 42, .12);
+  --ib-shadow-page: 0 8px 24px rgba(15, 23, 42, .14);
+  --ib-focus: 2px solid var(--ib-primary);
+  --ib-dur-fast: 120ms;
+  --ib-dur: 200ms;
+  --ib-dur-drawer: 240ms;
+  --ib-ease: cubic-bezier(.2, .8, .2, 1);
+}
+
+/* AppShell sets data-theme on its root element; custom properties inherit to everything inside. */
+[data-theme="dark"] {
+  --ib-bg: #0B1120;
+  --ib-surface: #111827;
+  --ib-surface-2: #1F2937;
+  --ib-border: #1F2937;
+  --ib-border-strong: #334155;
+  --ib-text: #F1F5F9;
+  --ib-text-2: #CBD5E1;
+  --ib-muted: #A3B0C2;
+  --ib-primary: #2DD4BF;
+  --ib-on-primary: #042F2E;
+  --ib-primary-soft: #134E4A;
+  --ib-primary-soft-text: #CCFBF1;
+  --ib-danger: #FCA5A5;
+  --ib-success: #86EFAC;
+  --ib-nav-bg: #020617;
+  --ib-chart: #134E4A;
+  --ib-chart-current: #2DD4BF;
+
+  --ib-st-draft-bg: #334155;  --ib-st-draft-fg: #E2E8F0;
+  --ib-st-info-bg: #1E3A8A;   --ib-st-info-fg: #DBEAFE;
+  --ib-st-accept-bg: #134E4A; --ib-st-accept-fg: #CCFBF1;
+  --ib-st-warn-bg: #78350F;   --ib-st-warn-fg: #FEF3C7;
+  --ib-st-ok-bg: #14532D;     --ib-st-ok-fg: #DCFCE7;
+  --ib-st-bad-bg: #7F1D1D;    --ib-st-bad-fg: #FEE2E2;
+}
+
+html, body { background: var(--ib-bg); color: var(--ib-text); font-family: var(--ib-font); font-size: 14px; }
+.ib-mono, .ib-money { font-family: var(--ib-font-mono); font-variant-numeric: tabular-nums; }
+:focus-visible { outline: var(--ib-focus); outline-offset: 2px; }
+
+.ib-skip-link { position: absolute; left: -9999px; top: 8px; z-index: 2000; padding: 10px 14px; border-radius: var(--ib-radius-control); background: var(--ib-primary); color: var(--ib-on-primary); font-weight: 700; }
+.ib-skip-link:focus { left: 8px; }
+.ib-visually-hidden { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* motion: opt-in classes, disabled for reduced motion */
+.ib-motion { transition: background-color var(--ib-dur-fast) var(--ib-ease), color var(--ib-dur-fast) var(--ib-ease), box-shadow var(--ib-dur) var(--ib-ease), transform var(--ib-dur) var(--ib-ease); }
+.ib-motion-press:active { transform: scale(.98); }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+
+/* status pill */
+.ib-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; line-height: 16px; white-space: nowrap; }
+.ib-pill__dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.ib-pill__dot--hollow { background: transparent !important; box-shadow: inset 0 0 0 1.5px currentColor; }
+.ib-pill--draft  { background: var(--ib-st-draft-bg);  color: var(--ib-st-draft-fg); }  .ib-pill--draft  .ib-pill__dot { background: var(--ib-st-draft-dot); }
+.ib-pill--info   { background: var(--ib-st-info-bg);   color: var(--ib-st-info-fg); }   .ib-pill--info   .ib-pill__dot { background: var(--ib-st-info-dot); }
+.ib-pill--accept { background: var(--ib-st-accept-bg); color: var(--ib-st-accept-fg); } .ib-pill--accept .ib-pill__dot { background: var(--ib-st-accept-dot); }
+.ib-pill--warn   { background: var(--ib-st-warn-bg);   color: var(--ib-st-warn-fg); }   .ib-pill--warn   .ib-pill__dot { background: var(--ib-st-warn-dot); }
+.ib-pill--ok     { background: var(--ib-st-ok-bg);     color: var(--ib-st-ok-fg); }     .ib-pill--ok     .ib-pill__dot { background: var(--ib-st-ok-dot); }
+.ib-pill--bad    { background: var(--ib-st-bad-bg);    color: var(--ib-st-bad-fg); }    .ib-pill--bad    .ib-pill__dot { background: var(--ib-st-bad-dot); }
+
+/* shell */
+.ib-shell { min-height: 100vh; display: flex; flex-wrap: wrap; background: var(--ib-bg); }
+.ib-nav { flex: 1 1 240px; max-width: 240px; box-sizing: border-box; background: var(--ib-nav-bg); color: var(--ib-nav-text); padding: 24px 16px; display: flex; flex-direction: column; gap: 24px; }
+.ib-nav--rail { flex: 0 0 72px; max-width: 72px; padding: 20px 12px; align-items: center; }
+.ib-nav__link { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 0 12px; border-radius: 8px; color: var(--ib-nav-text); text-decoration: none; }
+.ib-nav__link:hover { background: rgba(255, 255, 255, .06); }
+.ib-nav__link[aria-current="page"] { background: var(--ib-nav-active-bg); color: #FFFFFF; font-weight: 600; }
+.ib-nav--rail .ib-nav__link { width: 48px; height: 48px; padding: 0; justify-content: center; }
+.ib-nav__mark { width: 32px; height: 32px; border-radius: 8px; background: var(--ib-brand-mark); color: #0F172A; display: flex; align-items: center; justify-content: center; font-weight: 800; }
+.ib-main { flex: 999 1 560px; min-width: 0; box-sizing: border-box; padding: 28px 32px 40px; }
+@media (max-width: 959.98px) {
+  .ib-nav:not(.ib-nav--open) { display: none; }
+  .ib-nav { max-width: none; flex-basis: 100%; }
+  .ib-main { padding: 16px; }
+}
+
+.ib-card { background: var(--ib-surface); border: 1px solid var(--ib-border); border-radius: var(--ib-radius-card); }
+.ib-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 40px 20px; text-align: center; color: var(--ib-muted); }
+.ib-empty__title { margin: 0; font-size: 16px; font-weight: 700; color: var(--ib-text); }

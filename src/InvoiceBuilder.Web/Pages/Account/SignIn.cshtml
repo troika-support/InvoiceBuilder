@@ -1,0 +1,24 @@
+@page "/account/sign-in"
+@model InvoiceBuilder.Web.Pages.Account.SignInModel
+@{
+    ViewData["Title"] = "Sign in";
+}
+<h1>Sign in</h1>
+@if (Model.Error is not null)
+{
+    <p class="auth-error" role="alert">@Model.Error</p>
+}
+<form method="post">
+    <label class="auth-field">Email
+        <input asp-for="Email" type="email" autocomplete="username" required />
+    </label>
+    <label class="auth-field">Password
+        <input asp-for="Password" type="password" autocomplete="current-password" required />
+    </label>
+    <button class="auth-button" type="submit">Sign in</button>
+</form>
+<p><a href="/account/forgot-password">Forgot your password?</a></p>
+@if (Model.SetupOpen)
+{
+    <p><a href="/account/setup">First time here? Set up your account</a></p>
+}

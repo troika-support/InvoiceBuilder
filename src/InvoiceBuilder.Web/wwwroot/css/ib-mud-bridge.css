@@ -1,0 +1,23 @@
+/* Bridges MudBlazor components to the Invoice Builder tokens. Load after MudBlazor.min.css and ib-tokens.css. */
+
+.mud-button-root { min-height: 44px; border-radius: var(--ib-radius-control) !important; font-weight: 700 !important; text-transform: none !important; letter-spacing: 0 !important; }
+.mud-button-root.mud-button-filled-primary { background: var(--ib-primary); color: var(--ib-on-primary); }
+.mud-icon-button { min-width: 44px; min-height: 44px; }
+
+.mud-input-outlined-border { border-radius: var(--ib-radius-control) !important; border-color: var(--ib-border-strong) !important; }
+.mud-input-control > .mud-input-control-input-container > .mud-input-label { color: var(--ib-text-2); font-weight: 600; }
+.mud-input-helper-text.mud-input-error { color: var(--ib-danger); font-weight: 600; }
+
+.mud-paper-outlined, .mud-card { border-color: var(--ib-border) !important; border-radius: var(--ib-radius-card) !important; }
+.mud-table-head .mud-table-cell { color: var(--ib-muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.mud-table-row { min-height: 48px; }
+.mud-table-container { overflow-x: auto; }
+
+.mud-tab { text-transform: none !important; font-weight: 600; min-height: 44px; }
+.mud-chip { font-weight: 700; }
+.mud-snackbar { border-radius: var(--ib-radius-control) !important; font-family: var(--ib-font); }
+.mud-dialog, .mud-popover-paper { box-shadow: var(--ib-shadow-float) !important; }
+.mud-drawer { transition-duration: var(--ib-dur-drawer) !important; }
+
+/* MudBlazor focus states can be subtle: force the token outline */
+.mud-button-root:focus-visible, .mud-icon-button:focus-visible, .mud-nav-link:focus-visible, .mud-tab:focus-visible { outline: var(--ib-focus) !important; outline-offset: 2px; }

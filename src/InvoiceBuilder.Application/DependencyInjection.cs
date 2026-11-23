@@ -1,0 +1,36 @@
+using FluentValidation;
+using InvoiceBuilder.Application.Abstractions;
+using InvoiceBuilder.Application.Activity;
+using InvoiceBuilder.Application.Behaviours;
+using InvoiceBuilder.Application.Formatting;
+using InvoiceBuilder.Application.Options;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+
+namespace InvoiceBuilder.Application;
+
+public static class DependencyInjection
+{
+    public static IServiceCollection AddApplication(this IServiceCollection services)
+    {
+        var assembly = typeof(DependencyInjection).Assembly;
+
+        services.AddMediatR(config =>
+        {
+            config.RegisterServicesFromAssembly(assembly);
+            config.AddOpenBehavior(typeof(SerialisationBehaviour<,>));
+            config.AddOpenBehavior(typeof(LoggingBehaviour<,>));
+            config.AddOpenBehavior(typeof(ValidationBehaviour<,>));
+            config.AddOpenBehavior(typeof(UnitOfWorkBehaviour<,>));
+        });
+        services.AddScoped<RequestGate>();
+        services.AddValidatorsFromAssembly(assembly);
+        services.AddScoped<IDomainEventDispatcher, DomainEventDispatcher>();
+        services.AddScoped<InvoiceBuilder.Application.Documents.IDocumentHtmlService, InvoiceBuilder.Application.Documents.DocumentHtmlService>();
+        services.AddScoped<InvoiceBuilder.Application.Documents.ClientLinkService>();
+        services.AddSingleton<IDisplayFormatter>(provider =>
+            new DisplayFormatter(provider.GetRequiredService<IOptions<AppOptions>>().Value.TimeZone));
+
+        return services;
+    }
+}

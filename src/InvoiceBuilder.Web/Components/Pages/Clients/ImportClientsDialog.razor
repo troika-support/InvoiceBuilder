@@ -1,0 +1,154 @@
+@using InvoiceBuilder.Application.Clients
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+
+<MudDialog aria-labelledby="import-title">
+    <TitleContent>
+        <h2 id="import-title" class="ib-section-title">Import clients from CSV</h2>
+    </TitleContent>
+    <DialogContent>
+        <p class="ib-help" style="margin-top: 0;">Columns: name (required), email, phone, address. The first row must be the column names. Nothing is saved until you confirm.</p>
+
+        <div class="ib-logo-actions">
+            <label for="csv-input" class="ib-file-button">Choose a CSV file</label>
+            <InputFile id="csv-input" accept=".csv,text/csv" OnChange="OnFileAsync" class="ib-visually-hidden" />
+            @if (_fileName is not null)
+            {
+                <span class="ib-help">@_fileName</span>
+            }
+        </div>
+
+        @if (_error is not null)
+        {
+            <MudAlert Severity="Severity.Error" role="alert" Class="mt-4">@_error</MudAlert>
+        }
+
+        @if (_preview is not null)
+        {
+            <p role="status" style="margin: 16px 0 8px;">
+                <strong>@_preview.ValidCount ready to import</strong>
+                @if (_preview.ErrorCount > 0)
+                {
+                    <span> · @_preview.ErrorCount with problems (skipped)</span>
+                }
+            </p>
+            <div style="max-height: 360px; overflow: auto;">
+                <table class="ib-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">Line</th>
+                            <th scope="col">Name</th>
+                            <th scope="col">Email</th>
+                            <th scope="col">Phone</th>
+                            <th scope="col">Problems</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var row in _preview.Rows)
+                        {
+                            <tr>
+                                <td>@row.LineNumber</td>
+                                <th scope="row">@(row.Name.Length == 0 ? "—" : row.Name)</th>
+                                <td>@row.Email</td>
+                                <td>@row.Phone</td>
+                                <td>
+                                    @if (row.IsValid)
+                                    {
+                                        <span>OK</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="ib-field-error">Error: @string.Join(" ", row.Errors)</span>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </DialogContent>
+    <DialogActions>
+        <MudButton Variant="Variant.Text" OnClick="Cancel" Disabled="_busy">Cancel</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="ImportAsync"
+                   Disabled="@(_busy || _preview is null || _preview.ValidCount == 0)">
+            @(_preview is { ValidCount: > 0 } p ? $"Import {p.ValidCount} client{(p.ValidCount == 1 ? "" : "s")}" : "Import")
+        </MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    private const long MaxFileBytes = 1024 * 1024;
+
+    [CascadingParameter] private IMudDialogInstance Dialog { get; set; } = default!;
+
+    private string? _content;
+    private string? _fileName;
+    private string? _error;
+    private ClientImportPreview? _preview;
+    private bool _busy;
+
+    private void Cancel() => Dialog.Cancel();
+
+    private async Task OnFileAsync(InputFileChangeEventArgs e)
+    {
+        _busy = true;
+        _error = null;
+        _preview = null;
+        _content = null;
+        _fileName = e.File.Name;
+        try
+        {
+            if (e.File.Size > MaxFileBytes)
+            {
+                _error = "The file is larger than 1 MB. Split it into smaller files.";
+                Announcer.Announce(_error);
+                return;
+            }
+
+            using var reader = new StreamReader(e.File.OpenReadStream(MaxFileBytes));
+            _content = await reader.ReadToEndAsync();
+
+            var result = await Sender.Send(new PreviewClientImportQuery(_content));
+            if (result.IsFailure)
+            {
+                _error = result.Error.Message;
+                Announcer.Announce(_error);
+                return;
+            }
+
+            _preview = result.Value;
+            Announcer.Announce($"{_preview.ValidCount} ready to import, {_preview.ErrorCount} with problems.");
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task ImportAsync()
+    {
+        if (_content is null)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            var result = await Sender.Send(new ImportClientsCommand(_content));
+            if (result.IsFailure)
+            {
+                _error = result.Error.Message;
+                Announcer.Announce(_error);
+                return;
+            }
+
+            Dialog.Close(DialogResult.Ok(result.Value));
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

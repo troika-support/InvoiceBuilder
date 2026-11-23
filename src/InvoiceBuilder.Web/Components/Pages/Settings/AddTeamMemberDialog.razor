@@ -1,0 +1,68 @@
+@using InvoiceBuilder.Application.Businesses.Settings
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+
+<MudDialog aria-labelledby="add-member-title">
+    <TitleContent>
+        <h2 id="add-member-title" class="ib-section-title">Add a team member</h2>
+    </TitleContent>
+    <DialogContent>
+        <p class="ib-help" style="margin-top: 0;">They are added as Staff with access to the selected business. Share the temporary password with them yourself.</p>
+        @if (_formError is not null)
+        {
+            <MudAlert Severity="Severity.Error" role="alert" Class="mb-4">@_formError</MudAlert>
+        }
+        <div class="ib-form-grid">
+            <MudTextField @bind-Value="_name" Label="Name" Required="true" Variant="Variant.Outlined" AutoFocus="true" Error="@HasError("Name")" ErrorText="@ErrorFor("Name")" />
+            <MudTextField @bind-Value="_email" Label="Email" InputType="InputType.Email" Required="true" Variant="Variant.Outlined" Error="@HasError("Email")" ErrorText="@ErrorFor("Email")" />
+            <MudTextField @bind-Value="_password" Label="Temporary password" InputType="InputType.Password" Required="true" Variant="Variant.Outlined"
+                          UserAttributes="@(new Dictionary<string, object?> { ["autocomplete"] = "new-password" })"
+                          HelperText="At least 12 characters." Error="@HasError("TemporaryPassword")" ErrorText="@ErrorFor("TemporaryPassword")" Class="ib-form-grid__wide" />
+        </div>
+    </DialogContent>
+    <DialogActions>
+        <MudButton Variant="Variant.Text" OnClick="Cancel" Disabled="_saving">Cancel</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveAsync" Disabled="_saving">Add team member</MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] private IMudDialogInstance Dialog { get; set; } = default!;
+
+    private string _name = "";
+    private string _email = "";
+    private string _password = "";
+    private string? _formError;
+    private bool _saving;
+    private IReadOnlyDictionary<string, string[]> _fieldErrors = new Dictionary<string, string[]>();
+
+    private void Cancel() => Dialog.Cancel();
+
+    private async Task SaveAsync()
+    {
+        _saving = true;
+        _formError = null;
+        _fieldErrors = new Dictionary<string, string[]>();
+        try
+        {
+            var result = await Sender.Send(new AddTeamMemberCommand(_name, _email, _password));
+            if (result.IsFailure)
+            {
+                _fieldErrors = result.Error.FieldErrors ?? new Dictionary<string, string[]>();
+                _formError = result.Error.Message;
+                Announcer.Announce(result.Error.Message);
+                return;
+            }
+
+            Dialog.Close(DialogResult.Ok(true));
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private bool HasError(string field) => _fieldErrors.ContainsKey(field);
+
+    private string? ErrorFor(string field) => _fieldErrors.TryGetValue(field, out var messages) ? string.Join(" ", messages) : null;
+}

@@ -1,0 +1,1066 @@
+@page "/invoices/new"
+@page "/quotes/new"
+@page "/invoices/{Id:guid}"
+@page "/quotes/{Id:guid}"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize(Policy = "Staff")]
+@implements IAsyncDisposable
+@using InvoiceBuilder.Application.Catalogue
+@using InvoiceBuilder.Application.Clients
+@using InvoiceBuilder.Application.Documents
+@using InvoiceBuilder.Application.Payments
+@using InvoiceBuilder.Domain.Documents
+@using InvoiceBuilder.Domain.ValueObjects
+@inject MediatR.ISender Sender
+@inject IDisplayFormatter Format
+@inject ISnackbar Snackbar
+@inject NavigationManager Nav
+@inject TimeProvider Clock
+@inject IJSRuntime Js
+@inject IDialogService Dialogs
+@inject ILogger<DocumentEditorPage> Logger
+
+<PageTitle>@Title · Invoice Builder</PageTitle>
+
+<div class="ib-page-header">
+    <div>
+        <nav aria-label="Breadcrumb" class="ib-help">
+            <a href="@ListUrl">@ListLabel</a> <span aria-hidden="true">›</span> <span aria-current="page">@(_model?.Number ?? "New draft")</span>
+        </nav>
+        <div class="ib-editor__title">
+            <h1 class="ib-page-title" style="margin: 0;">@Title</h1>
+            <StatusPill Status="@PillKind" />
+        </div>
+        <p class="ib-help" role="status" aria-live="polite" style="margin: 4px 0 0;">@SaveStatus</p>
+    </div>
+    <div class="ib-editor__actions">
+        @if (_model is not null)
+        {
+            <MudButton Variant="Variant.Outlined" OnClick="DuplicateAsync" Disabled="_busy">Duplicate</MudButton>
+            <MudButton Variant="Variant.Outlined" OnClick="SaveNowAsync" Disabled="@(_busy || !_dirty || !Editable)">Save draft</MudButton>
+            <MudButton Variant="Variant.Outlined" Href="@($"/api/documents/{_model.Id}/pdf?templateVersionId={_templateVersionId}")" Target="_blank" Disabled="@(_templateVersionId is null && Editable)">PDF</MudButton>
+        }
+        @if (_model is not null && !Editable && !IsQuote && _model.Type == DocumentType.Invoice && _model.Status != DocumentStatus.Void)
+        {
+            <AuthorizeView Policy="Owner">
+                @if (_model.Instalments.Count > 0)
+                {
+                    <MudButton Variant="Variant.Outlined" OnClick="RescheduleAsync" Disabled="_busy">Reschedule</MudButton>
+                }
+                <MudButton Variant="Variant.Outlined" OnClick="CreditNoteAsync" Disabled="_busy">Issue credit note</MudButton>
+                <MudButton Variant="Variant.Outlined" OnClick="() => _recurringOpen = true" Disabled="_busy">Make recurring</MudButton>
+                @if (_model.Instalments.Count > 0 || _model.DueDate is not null)
+                {
+                    <MudButton Variant="Variant.Outlined" OnClick="ToggleRemindersAsync" Disabled="_busy">@(_model.RemindersPaused ? "Resume reminders" : "Pause reminders")</MudButton>
+                }
+            </AuthorizeView>
+        }
+        @if (_model is not null && !Editable && _model.Number is not null && _model.Status != DocumentStatus.Void)
+        {
+            <MudButton Variant="Variant.Outlined" Class="ml-1" OnClick="SendAgainAsync" Disabled="_busy">Send again</MudButton>
+        }
+        @if (Editable)
+        {
+            <MudMenu Label="@(IsQuote ? "Issue & send quote" : "Issue & send")" Variant="Variant.Filled" Color="Color.Primary" EndIcon="@Icons.Material.Filled.ArrowDropDown" Disabled="@(_busy || _model is null || Missing.Count > 0 || _templateVersionId is null)">
+                <MudMenuItem OnClick="IssueAndSendAsync">Email or WhatsApp…</MudMenuItem>
+                <MudMenuItem OnClick="IssueAsync">Copy link</MudMenuItem>
+                <MudMenuItem OnClick="IssueAsync">Issue without sending</MudMenuItem>
+            </MudMenu>
+        }
+    </div>
+</div>
+
+@if (_loadError is not null)
+{
+    <EmptyState Title="@_loadError" Message="Go back to the list and open the document again." />
+}
+else if (_clients is null)
+{
+    <MudProgressLinear Indeterminate="true" aria-label="Loading editor" />
+}
+else
+{
+    @if (_issuedLink is not null)
+    {
+        <MudAlert Severity="Severity.Success" Class="mb-4">
+            Issued as @_model?.Number. Client link (shown once): <code>@_issuedLink</code>
+            <MudButton Variant="Variant.Text" OnClick="CopyLinkAsync">Copy link</MudButton>
+        </MudAlert>
+    }
+
+    @if (_model is not null && !Editable)
+    {
+        <MudAlert Severity="Severity.Info" Class="mb-4">This document has been issued and can no longer be edited. Raise a credit note to correct it.</MudAlert>
+    }
+
+    @foreach (var f in _sendFailures)
+    {
+        <MudAlert Severity="Severity.Error" Class="mb-4">Sending by @f.Channel to @f.To failed: @f.Error Use Send again to retry.</MudAlert>
+    }
+
+    @if (_receipts.Count > 0)
+    {
+        <section class="ib-card" aria-labelledby="receipts-title" style="padding: 16px 20px; margin-bottom: 16px;">
+            <h2 id="receipts-title" class="ib-card__title">Receipts</h2>
+            <ul class="ib-contacts">
+                @foreach (var r in _receipts)
+                {
+                    <li>
+                        <strong>@r.Number</strong>
+                        <span> · @(r.IssuedOn is { } on ? Format.Date(new DateTimeOffset(on.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero)) : string.Empty) · @Format.Money(r.Total, r.Currency)</span>
+                        <MudButton Variant="Variant.Text" Href="@($"/api/documents/{r.Id}/pdf")" Target="_blank" aria-label="@($"Open receipt {r.Number} as PDF")">PDF</MudButton>
+                    </li>
+                }
+            </ul>
+        </section>
+    }
+    @if (Missing.Count > 0)
+    {
+        <section class="ib-card ib-card--dashed" aria-label="Before you can issue" style="padding: 12px 16px; margin-bottom: 16px;">
+            <strong>Before you can issue:</strong>
+            <ul class="ib-contacts">
+                @foreach (var item in Missing)
+                {
+                    <li>@item</li>
+                }
+            </ul>
+        </section>
+    }
+
+    <div class="ib-editor">
+        <div class="ib-editor__main">
+            <section class="ib-card" aria-labelledby="details-title" style="padding: 20px;">
+                <h2 id="details-title" class="ib-card__title">Client and details</h2>
+                @if (SelectedClient is { } picked)
+                {
+                    <div class="ib-client-card" style="display: flex; gap: 12px; align-items: center; margin-bottom: 16px;">
+                        <MudAvatar Color="Color.Primary" aria-hidden="true">@Initials(picked.Name)</MudAvatar>
+                        <div>
+                            <strong>@picked.Name</strong>
+                            @if (!string.IsNullOrWhiteSpace(picked.Email))
+                            {
+                                <div class="ib-help">@picked.Email</div>
+                            }
+                            @if (!string.IsNullOrWhiteSpace(picked.Phone))
+                            {
+                                <div class="ib-help">@picked.Phone</div>
+                            }
+                        </div>
+                        @if (Editable)
+                        {
+                            <MudButton Variant="Variant.Text" OnClick="() => _changingClient = true" Style="margin-left: auto;">Change</MudButton>
+                        }
+                    </div>
+                }
+                <p class="ib-help">The number is assigned when you issue. The exchange rate is locked on the document at that moment.</p>
+                <div class="ib-form-grid">
+                    @if (SelectedClient is null || _changingClient)
+                    {
+                    <MudSelect T="Guid?" Value="@(_clientId is { } selectedId && selectedId != Guid.Empty ? selectedId : null)" ValueChanged="OnClientChangedAsync"
+                               Label="Client" Variant="Variant.Outlined" Required="true" Disabled="@(!Editable)"
+                               ToStringFunc="@(id => id is { } g && g != Guid.Empty ? _clients.FirstOrDefault(c => c.Id == g)?.Name ?? string.Empty : string.Empty)">
+                        @foreach (var c in _clients)
+                        {
+                            <MudSelectItem T="Guid?" Value="@((Guid?)c.Id)">@c.Name</MudSelectItem>
+                        }
+                    </MudSelect>
+                    }
+                    <MudSelect T="string" Value="_currency" ValueChanged="v => Change(() => _currency = v)" Label="Currency" Variant="Variant.Outlined" Disabled="@(!Editable || _model is null)">
+                        <MudSelectItem T="string" Value="@("USD")">USD</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("ZWG")">ZiG</MudSelectItem>
+                    </MudSelect>
+                    <MudDatePicker Date="_issueDate" DateChanged="v => Change(() => _issueDate = v)" Label="Issue date" Variant="Variant.Outlined" Disabled="@(!Editable || _model is null)" Clearable="true" />
+                    @if (IsQuote)
+                    {
+                        <MudDatePicker Date="_validUntil" DateChanged="v => Change(() => _validUntil = v)" Label="Valid until" Variant="Variant.Outlined" Disabled="@(!Editable || _model is null)" Clearable="true" />
+                    }
+                    else
+                    {
+                        <MudDatePicker Date="_dueDate" DateChanged="v => Change(() => _dueDate = v)" Label="Due date" Variant="Variant.Outlined" Disabled="@(!Editable || _model is null || _plan.Count > 0)" Clearable="true"
+                                       HelperText="@(_plan.Count > 0 ? "Set by the last instalment" : null)" />
+                    }
+                </div>
+            </section>
+
+            @if (_model is not null)
+            {
+                <section class="ib-card" aria-labelledby="lines-title" style="padding: 20px;">
+                    <h2 id="lines-title" class="ib-card__title">Lines</h2>
+                    <div style="overflow-x: auto;">
+                        <table class="ib-table">
+                            <thead>
+                                <tr>
+                                    <th scope="col">Description</th>
+                                    <th scope="col" class="ib-num">Qty</th>
+                                    <th scope="col" class="ib-num">Unit price</th>
+                                    <th scope="col">Tax</th>
+                                    <th scope="col" class="ib-num">Amount</th>
+                                    <th scope="col"><span class="visually-hidden">Actions</span></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @for (var i = 0; i < _lines.Count; i++)
+                                {
+                                    var line = _lines[i];
+                                    var index = i;
+                                    <tr>
+                                        <td style="min-width: 240px;">
+                                            <MudTextField T="string" Value="line.Description" ValueChanged="v => Change(() => line.Description = v)" Immediate="true" DebounceInterval="300"
+                                                          Label="Description" Variant="Variant.Outlined" Margin="Margin.Dense" Disabled="!Editable"
+                                                          Error="string.IsNullOrWhiteSpace(line.Description)" ErrorText="Enter a description." />
+                                            <MudTextField T="string" Value="line.Detail" ValueChanged="v => Change(() => line.Detail = v)" Immediate="true" DebounceInterval="300"
+                                                          Label="Detail (optional)" Variant="Variant.Outlined" Margin="Margin.Dense" Disabled="!Editable" />
+                                        </td>
+                                        <td style="width: 100px;">
+                                            <MudNumericField T="decimal" Value="line.Quantity" ValueChanged="v => Change(() => line.Quantity = v)" Immediate="true" DebounceInterval="300"
+                                                             Label="Qty" Variant="Variant.Outlined" Margin="Margin.Dense" Min="0" HideSpinButtons="true" Disabled="!Editable"
+                                                             Error="@(line.Quantity <= 0)" ErrorText="More than 0." />
+                                        </td>
+                                        <td style="width: 140px;">
+                                            <MudNumericField T="decimal" Value="line.UnitPrice" ValueChanged="v => Change(() => line.UnitPrice = v)" Immediate="true" DebounceInterval="300"
+                                                             Label="Unit price" Variant="Variant.Outlined" Margin="Margin.Dense" Min="0" HideSpinButtons="true" Format="N2" Disabled="!Editable"
+                                                             Error="@(line.UnitPrice < 0)" ErrorText="Cannot be negative." />
+                                        </td>
+                                        <td style="width: 160px;">
+                                            <MudSelect T="Guid?" Value="line.TaxRateId" ValueChanged="v => Change(() => line.TaxRateId = v)" Label="Tax" Variant="Variant.Outlined" Margin="Margin.Dense" Disabled="!Editable">
+                                                <MudSelectItem T="Guid?" Value="null">No tax</MudSelectItem>
+                                                @foreach (var rate in _taxRates)
+                                                {
+                                                    <MudSelectItem T="Guid?" Value="rate.Id">@rate.Name</MudSelectItem>
+                                                }
+                                            </MudSelect>
+                                        </td>
+                                        <td class="ib-num"><MoneyText Amount="DocumentCalculator.LineAmount(line.Quantity, line.UnitPrice)" Currency="@_currency" ShowCurrency="false" /></td>
+                                        <td style="white-space: nowrap;">
+                                            <MudIconButton Icon="@Icons.Material.Filled.ArrowUpward" aria-label="@($"Move line {index + 1} up")" Disabled="@(!Editable || index == 0)" OnClick="() => Move(index, -1)" />
+                                            <MudIconButton Icon="@Icons.Material.Filled.ArrowDownward" aria-label="@($"Move line {index + 1} down")" Disabled="@(!Editable || index == _lines.Count - 1)" OnClick="() => Move(index, 1)" />
+                                            <MudIconButton Icon="@Icons.Material.Filled.Delete" aria-label="@($"Remove line {index + 1}")" Disabled="!Editable" OnClick="() => Change(() => _lines.RemoveAt(index))" />
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                    @if (Editable)
+                    {
+                        <div class="ib-editor__line-tools">
+                            <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Add" OnClick="AddBlankLine" Disabled="@(_lines.Count >= UpsertDraftLinesCommand.MaxLines)">Add line</MudButton>
+                            <MudAutocomplete T="CatalogueSearchHit" Label="Add from catalogue…" SearchFunc="SearchCatalogueAsync" ToStringFunc="@(h => h?.Name)"
+                                             ValueChanged="AddFromCatalogue" Variant="Variant.Outlined" Margin="Margin.Dense" ResetValueOnEmptyText="true" Clearable="true"
+                                             Disabled="@(_lines.Count >= UpsertDraftLinesCommand.MaxLines)" Class="ib-editor__catalogue" />
+                        </div>
+                    }
+                </section>
+
+                <section class="ib-card" aria-labelledby="totals-title" style="padding: 20px;">
+                    <h2 id="totals-title" class="ib-card__title">Discount and totals</h2>
+                    <div class="ib-form-grid">
+                        <MudSelect T="DiscountKind" Value="_discountKind" ValueChanged="v => Change(() => _discountKind = v)" Label="Discount" Variant="Variant.Outlined" Disabled="!Editable">
+                            <MudSelectItem T="DiscountKind" Value="DiscountKind.None">No discount</MudSelectItem>
+                            <MudSelectItem T="DiscountKind" Value="DiscountKind.Percent">Percentage</MudSelectItem>
+                            <MudSelectItem T="DiscountKind" Value="DiscountKind.Fixed">Fixed amount</MudSelectItem>
+                        </MudSelect>
+                        @if (_discountKind != DiscountKind.None)
+                        {
+                            <MudNumericField T="decimal" Value="_discountValue" ValueChanged="v => Change(() => _discountValue = v)" Immediate="true" DebounceInterval="300"
+                                             Label="@(_discountKind == DiscountKind.Percent ? "Percent" : "Amount")" Variant="Variant.Outlined" Min="0" HideSpinButtons="true" Disabled="!Editable" />
+                        }
+                    </div>
+                    <dl class="ib-editor__totals">
+                        <div class="ib-editor__total"><dt>Subtotal</dt><dd><MoneyText Amount="_totals.Subtotal" Currency="@_currency" /></dd></div>
+                        <div class="ib-editor__total"><dt>Discount</dt><dd><MoneyText Amount="-_totals.DiscountTotal" Currency="@_currency" /></dd></div>
+                        <div class="ib-editor__total"><dt>Tax</dt><dd><MoneyText Amount="_totals.TaxTotal" Currency="@_currency" /></dd></div>
+                        <div class="ib-editor__total ib-editor__grand"><dt>Total</dt><dd><MoneyText Amount="_totals.Total" Currency="@_currency" Size="M" /></dd></div>
+                    </dl>
+                    @if (_dirty)
+                    {
+                        <p class="ib-help" style="margin: 0;">Totals update when the draft is saved.</p>
+                    }
+                </section>
+
+                <section class="ib-card" aria-labelledby="plan-title" style="padding: 20px;">
+                    <h2 id="plan-title" class="ib-card__title">Payment plan</h2>
+                    @if (_plan.Count == 0)
+                    {
+                        <MudSwitch T="bool" Value="_splitOn" ValueChanged="v => _splitOn = v" Label="Split into instalments" Color="Color.Primary" Disabled="!Editable" />
+                    }
+                    @if (_plan.Count == 0 && _splitOn)
+                    {
+                        <p class="ib-help">Split the total into @InstalmentPlanner.MinCount to @InstalmentPlanner.MaxCount instalments.</p>
+                        <div class="ib-form-grid">
+                            <MudNumericField T="int" @bind-Value="_genCount" Label="Instalments" Variant="Variant.Outlined" Min="InstalmentPlanner.MinCount" Max="InstalmentPlanner.MaxCount" Disabled="!Editable" />
+                            <MudSelect T="InstalmentFrequency" @bind-Value="_genFrequency" Label="Every" Variant="Variant.Outlined" Disabled="!Editable">
+                                <MudSelectItem T="InstalmentFrequency" Value="InstalmentFrequency.Weekly">Week</MudSelectItem>
+                                <MudSelectItem T="InstalmentFrequency" Value="InstalmentFrequency.EveryTwoWeeks">2 weeks</MudSelectItem>
+                                <MudSelectItem T="InstalmentFrequency" Value="InstalmentFrequency.Monthly">Month</MudSelectItem>
+                                <MudSelectItem T="InstalmentFrequency" Value="InstalmentFrequency.Quarterly">Quarter</MudSelectItem>
+                            </MudSelect>
+                            <MudSelect T="InstalmentDueKind" @bind-Value="_genFirstKind" Label="First payment" Variant="Variant.Outlined" Disabled="!Editable">
+                                <MudSelectItem T="InstalmentDueKind" Value="FirstKindWhenSigned">@(IsQuote ? "On acceptance" : "On issue")</MudSelectItem>
+                                <MudSelectItem T="InstalmentDueKind" Value="InstalmentDueKind.Date">On a date</MudSelectItem>
+                            </MudSelect>
+                            <MudDatePicker @bind-Date="_genFirstDate" Label="@(_genFirstKind == InstalmentDueKind.Date ? "First due date" : "Second due date")" Variant="Variant.Outlined" Disabled="!Editable" />
+                        </div>
+                        <MudButton Variant="Variant.Outlined" Class="mt-3" OnClick="GeneratePlan" Disabled="@(!Editable || _genFirstDate is null || _totals.Total <= 0 || _dirty)">Build plan</MudButton>
+                        @if (_dirty)
+                        {
+                            <p class="ib-help">Save the draft first so the plan uses the latest total.</p>
+                        }
+                    }
+                    else
+                    {
+                        <table class="ib-table">
+                            <thead>
+                                <tr><th scope="col">#</th><th scope="col">Due</th><th scope="col" class="ib-num">Amount</th><th scope="col" class="ib-num">Share</th><th scope="col"><span class="ib-visually-hidden">Actions</span></th></tr>
+                            </thead>
+                            <tbody>
+                                @for (var i = 0; i < _plan.Count; i++)
+                                {
+                                    var row = _plan[i];
+                                    <tr>
+                                        <td>@(i + 1)</td>
+                                        <td>
+                                            @if (row.DueKind == InstalmentDueKind.Date)
+                                            {
+                                                <MudDatePicker Date="row.DueDate" DateChanged="v => { row.DueDate = v; _planDirty = true; }" Label="@($"Due date {i + 1}")" Variant="Variant.Outlined" Margin="Margin.Dense" Disabled="!Editable" />
+                                            }
+                                            else
+                                            {
+                                                @(row.DueKind == InstalmentDueKind.OnAcceptance ? "On acceptance" : "On issue")
+                                            }
+                                        </td>
+                                        <td style="width: 160px;">
+                                            <MudNumericField T="decimal" Value="row.Amount" ValueChanged="v => { row.Amount = v; _planDirty = true; }" Immediate="true" DebounceInterval="200"
+                                                             HideSpinButtons="true" Format="N2" Disabled="!Editable" />
+                                        </td>
+                                        <td class="ib-num">@(_totals.Total > 0 ? (row.Amount / _totals.Total).ToString("P1") : "-")</td>
+                                        <td>
+                                            @if (Editable)
+                                            {
+                                                <MudIconButton Icon="@Icons.Material.Outlined.Close" aria-label="@($"Remove instalment {i + 1}")" Size="Size.Medium" Disabled="@(_plan.Count <= InstalmentPlanner.MinCount)" OnClick="() => RemoveInstalment(row)" />
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                        <p class="@(PlanDifference == 0 ? "ib-help" : "ib-field-error")" role="status" aria-live="polite">
+                            Scheduled @Format.Money(PlanSum, _currency) of @Format.Money(_totals.Total, _currency).
+                            @if (PlanDifference != 0)
+                            {
+                                <text> @(PlanDifference > 0 ? "Add" : "Remove") @Format.Money(Math.Abs(PlanDifference), _currency) to match the total.</text>
+                            }
+                        </p>
+                        @if (Editable)
+                        {
+                            <div class="ib-settings__footer" style="justify-content: flex-start;">
+                                <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SavePlanAsync" Disabled="@(_busy || PlanDifference != 0 || !_planDirty)">Save plan</MudButton>
+                                <MudButton Variant="Variant.Outlined" OnClick="ClearPlanAsync" Disabled="_busy">Remove plan</MudButton>
+                            </div>
+                        }
+                    }
+                </section>
+
+                <section class="ib-card" aria-labelledby="pay-title" style="padding: 20px;">
+                    <h2 id="pay-title" class="ib-card__title">Payment &amp; terms</h2>
+                                        <p class="ib-help" style="margin: 0 0 8px;">Let the client pay with</p>
+                    <MudChipSet T="AllowedPaymentMethods" CheckMark SelectionMode="SelectionMode.MultiSelection" SelectedValues="SelectedMethods" SelectedValuesChanged="OnMethodsChanged" ReadOnly="!Editable">
+                        <MudChip T="AllowedPaymentMethods" Value="AllowedPaymentMethods.EcoCash" Text="EcoCash" />
+                        <MudChip T="AllowedPaymentMethods" Value="AllowedPaymentMethods.Card" Text="Card" />
+                        <MudChip T="AllowedPaymentMethods" Value="AllowedPaymentMethods.BankTransfer" Text="Bank transfer" />
+                        <MudChip T="AllowedPaymentMethods" Value="AllowedPaymentMethods.Cash" Text="Cash" />
+                        <MudChip T="AllowedPaymentMethods" Value="AllowedPaymentMethods.OneMoney" Text="OneMoney" />
+                        <MudChip T="AllowedPaymentMethods" Value="AllowedPaymentMethods.InnBucks" Text="InnBucks" />
+                        <MudChip T="AllowedPaymentMethods" Value="AllowedPaymentMethods.Other" Text="Other" />
+                    </MudChipSet>
+                    <MudTextField T="string" Value="_notes" ValueChanged="v => Change(() => _notes = v)" Immediate="true" DebounceInterval="300" Label="Notes to the client" Lines="3" Variant="Variant.Outlined" MaxLength="2000" Disabled="!Editable" Class="mt-3" />
+                    <MudTextField T="string" Value="_terms" ValueChanged="v => Change(() => _terms = v)" Immediate="true" DebounceInterval="300" Label="Terms" Lines="3" Variant="Variant.Outlined" MaxLength="2000" Disabled="!Editable" Class="mt-3" />
+                </section>
+            }
+        </div>
+
+        <aside class="ib-editor__preview ib-card" aria-label="Live preview" style="padding: 20px;">
+            <h2 class="ib-card__title">Live preview</h2>
+            @if (Editable && _templates.Count > 0)
+            {
+                <MudSelect T="Guid?" Value="_templateVersionId" ValueChanged="OnTemplateChangedAsync" Label="Template" Variant="Variant.Outlined" Margin="Margin.Dense"
+                           ToStringFunc="@(id => _templates.FirstOrDefault(t => t.VersionId == id)?.Name ?? string.Empty)">
+                    @foreach (var t in _templates)
+                    {
+                        <MudSelectItem T="Guid?" Value="t.VersionId">@t.Name (v@(t.Version))</MudSelectItem>
+                    }
+                </MudSelect>
+                <a href="/templates" class="ib-help">Edit design</a>
+            }
+            else if (Editable && _model is not null)
+            {
+                <p class="ib-help">No published template for this document type. Publish one in Templates first.</p>
+            }
+
+            @if (_previewHtml is not null)
+            {
+                <iframe title="Document preview" sandbox="" srcdoc="@_previewHtml" style="width: 100%; height: 640px; border: 1px solid var(--ib-border, #ddd); background: #fff;"></iframe>
+                <p class="ib-help" style="text-align: center; margin: 8px 0 0;">Page 1 of 1 · A4</p>
+            }
+            else if (_previewError is not null)
+            {
+                <p class="ib-help" role="alert">@_previewError</p>
+            }
+            else
+            {
+                <p class="ib-help">Choose a client to start the draft and see the preview.</p>
+            }
+        </aside>
+    </div>
+}
+
+@if (_model is not null)
+{
+    <InvoiceBuilder.Web.Components.Pages.Recurring.RecurringDrawer Open="_recurringOpen" SourceDocumentId="_model.Id" OnClosed="OnRecurringClosed" />
+}
+
+@code {
+    private const int AutosaveMs = 5000;
+    private bool _recurringOpen;
+
+    private void OnRecurringClosed(bool saved)
+    {
+        _recurringOpen = false;
+        if (saved)
+        {
+            Snackbar.Add("Recurring schedule started.", Severity.Success);
+        }
+    }
+
+    [Parameter] public Guid? Id { get; set; }
+
+    private DocumentEditorModel? _model;
+    private IReadOnlyList<ReceiptRow> _receipts = [];
+    private IReadOnlyList<InvoiceBuilder.Application.Messaging.SendFailureRow> _sendFailures = [];
+    private IReadOnlyList<ClientListItem>? _clients;
+    private IReadOnlyList<TaxRateOption> _taxRates = [];
+    private string? _loadError;
+
+    private Guid? _clientId;
+    private string _currency = "USD";
+    private DateTime? _issueDate;
+    private DateTime? _dueDate;
+    private DateTime? _validUntil;
+    private DiscountKind _discountKind;
+    private decimal _discountValue;
+    private string? _notes;
+    private string? _terms;
+    private AllowedPaymentMethods _methods = AllowedPaymentMethods.All;
+    private List<LineRow> _lines = [];
+    private List<PlanRow> _plan = [];
+    private DraftTotals _totals = new(0m, 0m, 0m, 0m);
+
+    private int _genCount = 3;
+    private InstalmentFrequency _genFrequency = InstalmentFrequency.Monthly;
+    private InstalmentDueKind _genFirstKind = InstalmentDueKind.Date;
+    private DateTime? _genFirstDate;
+
+    private bool _dirty;
+    private IReadOnlyList<TemplateOption> _templates = [];
+    private Guid? _templateVersionId;
+    private string? _previewHtml;
+    private string? _previewError;
+    private string? _issuedLink;
+    private bool _planDirty;
+    private bool _splitOn;
+    private bool _changingClient;
+    private bool _busy;
+    private DateTimeOffset? _savedAt;
+    private string? _saveError;
+    private Timer? _timer;
+    private readonly SemaphoreSlim _saveLock = new(1, 1);
+
+    private bool IsQuote => _model?.Type == DocumentType.Quote || (_model is null && Nav.ToBaseRelativePath(Nav.Uri).StartsWith("quotes", StringComparison.OrdinalIgnoreCase));
+    private bool Editable => _model?.IsEditable ?? true;
+    private DocumentType Type => IsQuote ? DocumentType.Quote : DocumentType.Invoice;
+    private string Title => _model?.Number ?? (IsQuote ? "Draft quote" : "Draft invoice");
+    private string ListUrl => IsQuote ? "/quotes" : "/invoices";
+    private string ListLabel => IsQuote ? "Quotes" : "Invoices";
+    private InstalmentDueKind FirstKindWhenSigned => IsQuote ? InstalmentDueKind.OnAcceptance : InstalmentDueKind.OnIssue;
+    private void RemoveInstalment(PlanRow row)
+    {
+        _plan.Remove(row);
+        _planDirty = true;
+    }
+
+    private decimal PlanSum => _plan.Sum(p => p.Amount);
+    private decimal PlanDifference => _totals.Total - PlanSum;
+    private IReadOnlyCollection<AllowedPaymentMethods> SelectedMethods =>
+        Enum.GetValues<AllowedPaymentMethods>().Where(m => m is not (AllowedPaymentMethods.None or AllowedPaymentMethods.All) && _methods.HasFlag(m)).ToList();
+
+    private string SaveStatus => _saveError is not null ? _saveError
+        : _busy ? "Saving…"
+        : _dirty ? "Unsaved changes"
+        : _savedAt is { } at ? $"Saved {Format.Time(at)}"
+        : _model is null ? "Choose a client to start the draft." : $"Saved {Format.Time(_model.UpdatedAt)}";
+
+    private List<string> Missing
+    {
+        get
+        {
+            var missing = new List<string>();
+            if (_clientId is null) missing.Add("Choose a client.");
+            if (_lines.Count == 0) missing.Add("Add at least one line.");
+            if (_lines.Any(l => string.IsNullOrWhiteSpace(l.Description) || l.Quantity <= 0 || l.UnitPrice < 0)) missing.Add("Fix the highlighted lines.");
+            if (!IsQuote && _dueDate is null && _plan.Count == 0) missing.Add("Set a due date or a payment plan.");
+            if (_plan.Count > 0 && PlanDifference != 0) missing.Add("Make the payment plan add up to the total.");
+            return missing;
+        }
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _model = null;
+        _loadError = null;
+        _dirty = false;
+        _savedAt = null;
+
+        var clients = await Sender.Send(new GetClientsQuery(null, ClientFilter.All, 1, 500));
+        if (clients.IsFailure)
+        {
+            _loadError = clients.Error.Message;
+            return;
+        }
+
+        _clients = clients.Value.Items;
+        var rates = await Sender.Send(new GetTaxRateOptionsQuery());
+        _taxRates = rates.IsSuccess ? rates.Value : [];
+
+        if (Id is { } id)
+        {
+            var result = await Sender.Send(new GetDocumentForEditQuery(id));
+            if (result.IsFailure)
+            {
+                _loadError = result.Error.Message;
+                return;
+            }
+
+            Apply(result.Value);
+            _templates = await Sender.Send(new ListPublishedTemplatesQuery(Type));
+            _templateVersionId = result.Value.TemplateVersionId ?? _templates.FirstOrDefault()?.VersionId;
+            await RefreshPreviewAsync();
+        }
+    }
+
+    private ClientListItem? SelectedClient => _clients?.FirstOrDefault(c => c.Id == _clientId);
+
+    private static string Initials(string name) =>
+        string.Concat(name.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Take(2).Select(p => char.ToUpperInvariant(p[0])));
+
+    private StatusKind PillKind => _model?.Status switch
+    {
+        DocumentStatus.Issued or DocumentStatus.Sent => StatusKind.Sent,
+        DocumentStatus.Viewed => StatusKind.Viewed,
+        DocumentStatus.PartPaid => StatusKind.PartPaid,
+        DocumentStatus.Paid => StatusKind.Paid,
+        DocumentStatus.Accepted or DocumentStatus.Converted => StatusKind.Accepted,
+        DocumentStatus.Declined => StatusKind.Declined,
+        DocumentStatus.Expired => StatusKind.Expired,
+        DocumentStatus.Void => StatusKind.Void,
+        _ => StatusKind.Draft,
+    };
+
+    private async Task RefreshPreviewAsync()
+    {
+        if (_model is null || _templateVersionId is null)
+        {
+            return;
+        }
+
+        var preview = await Sender.Send(new PreviewDocumentQuery(_model.Id, _templateVersionId));
+        _previewHtml = preview.IsSuccess ? preview.Value : null;
+        _previewError = preview.IsFailure ? preview.Error.Message : null;
+    }
+
+    private async Task OnTemplateChangedAsync(Guid? versionId)
+    {
+        _templateVersionId = versionId;
+        await RefreshPreviewAsync();
+    }
+
+    private static readonly TimeSpan IssueTimeout = TimeSpan.FromSeconds(30);
+
+    private string? _issuedToken;
+
+    private async Task IssueAndSendAsync()
+    {
+        await IssueAsync();
+        if (_issuedToken is not null)
+        {
+            await OpenSendDialogAsync(_issuedToken);
+        }
+    }
+
+    private Task SendAgainAsync() => OpenSendDialogAsync(null);
+
+    private async Task OpenSendDialogAsync(string? token)
+    {
+        if (_model is null)
+        {
+            return;
+        }
+
+        var client = SelectedClient;
+        var parameters = new DialogParameters<SendDialog>
+        {
+            { x => x.DocumentId, _model.Id },
+            { x => x.Number, _model.Number ?? string.Empty },
+            { x => x.Amount, Format.Money(_model.Totals.Total, _model.Currency) },
+            { x => x.ClientName, client?.Name ?? string.Empty },
+            { x => x.ClientEmail, client?.Email },
+            { x => x.ClientPhone, client?.Phone },
+            { x => x.LinkToken, token },
+        };
+        var dialog = await Dialogs.ShowAsync<SendDialog>("Send", parameters);
+        var result = await dialog.Result;
+        if (result is { Canceled: false })
+        {
+            _issuedToken = null;
+            Snackbar.Add("Sending. Check the document activity for the result.", Severity.Success);
+            await ReloadAsync();
+        }
+    }
+
+    private async Task IssueAsync()
+    {
+        _issuedToken = null;
+        if (_model is null || _templateVersionId is not { } versionId)
+        {
+            return;
+        }
+
+        await SaveAsync(showErrors: true);
+        if (_dirty)
+        {
+            return;
+        }
+
+        _busy = true;
+        InvoiceBuilder.Domain.Common.Result<IssuedDocument> issued;
+        try
+        {
+            using var timeout = new CancellationTokenSource(IssueTimeout);
+            issued = await Sender.Send(new IssueDocumentCommand(_model.Id, versionId), timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            Logger.LogError("Issuing document {DocumentId} timed out after {Seconds}s", _model.Id, IssueTimeout.TotalSeconds);
+            Snackbar.Add($"Issuing timed out after {IssueTimeout.TotalSeconds:0} seconds. The document was not issued. Check for a blocked database or background job, then try again.", Severity.Error);
+            return;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Issuing document {DocumentId} failed", _model.Id);
+            Snackbar.Add("Could not issue the document. Please try again; the details are in the log.", Severity.Error);
+            return;
+        }
+        finally
+        {
+            _busy = false;
+        }
+
+        if (issued.IsFailure)
+        {
+            Snackbar.Add(issued.Error.Message, Severity.Error);
+            return;
+        }
+
+        _issuedToken = issued.Value.LinkToken;
+        _issuedLink = Nav.ToAbsoluteUri($"/d/{issued.Value.LinkToken}").ToString();
+        var reloaded = await Sender.Send(new GetDocumentForEditQuery(_model.Id));
+        if (reloaded.IsSuccess)
+        {
+            Apply(reloaded.Value);
+        }
+
+        await RefreshPreviewAsync();
+        Snackbar.Add($"Issued {issued.Value.Number}.", Severity.Success);
+    }
+
+    private async Task CopyLinkAsync()
+    {
+        if (_issuedLink is not null)
+        {
+            await Js.InvokeVoidAsync("navigator.clipboard.writeText", _issuedLink);
+            Snackbar.Add("Link copied.", Severity.Info);
+        }
+    }
+
+    private void Apply(DocumentEditorModel m)
+    {
+        _model = m;
+        _ = LoadReceiptsAsync(m);
+        _clientId = m.ClientId;
+        _currency = m.Currency;
+        _issueDate = ToDateTime(m.IssueDate);
+        _dueDate = ToDateTime(m.DueDate);
+        _validUntil = ToDateTime(m.ValidUntil);
+        _discountKind = m.DiscountKind;
+        _discountValue = m.DiscountValue;
+        _notes = m.Notes;
+        _terms = m.Terms;
+        _methods = m.PaymentMethods;
+        _totals = m.Totals;
+        _lines = m.Lines.Select(l => new LineRow
+        {
+            Description = l.Description, Detail = l.Detail, Quantity = l.Quantity, UnitPrice = l.UnitPrice,
+            LineDiscount = l.LineDiscount, TaxRateId = l.TaxRateId, HsCode = l.HsCode, CatalogueItemId = l.CatalogueItemId,
+        }).ToList();
+        _plan = m.Instalments.Select(i => new PlanRow { DueKind = i.DueKind, DueDate = ToDateTime(i.DueDate), Amount = i.Amount, Note = i.Note }).ToList();
+        _planDirty = false;
+    }
+
+    private async Task OnClientChangedAsync(Guid? selected)
+    {
+        if (selected is not { } clientId)
+        {
+            return;
+        }
+
+        _clientId = clientId;
+        if (_model is not null)
+        {
+            Change(() => { });
+            return;
+        }
+
+        _busy = true;
+        var created = await Sender.Send(new CreateDraftDocumentCommand(Type, clientId));
+        _busy = false;
+        if (created.IsFailure)
+        {
+            Snackbar.Add(created.Error.Message, Severity.Error);
+            return;
+        }
+
+        Nav.NavigateTo($"{ListUrl}/{created.Value}", replace: true);
+    }
+
+    private void Change(Action apply)
+    {
+        apply();
+        if (_model is null || !Editable)
+        {
+            return;
+        }
+
+        _dirty = true;
+        _saveError = null;
+        _timer ??= new Timer(_ => _ = InvokeAsync(AutosaveAsync), null, Timeout.Infinite, Timeout.Infinite);
+        _timer.Change(AutosaveMs, Timeout.Infinite);
+    }
+
+    private async Task AutosaveAsync()
+    {
+        await SaveAsync(showErrors: false);
+        StateHasChanged();
+    }
+
+    private Task SaveNowAsync() => SaveAsync(showErrors: true);
+
+    private async Task SaveAsync(bool showErrors)
+    {
+        if (_model is null || !_dirty || !Editable)
+        {
+            return;
+        }
+
+        await _saveLock.WaitAsync();
+        try
+        {
+            _busy = true;
+            _timer?.Change(Timeout.Infinite, Timeout.Infinite);
+
+            // Rows still invalid are kept on screen and saved once fixed.
+            if (_lines.Any(l => string.IsNullOrWhiteSpace(l.Description) || l.Quantity <= 0 || l.UnitPrice < 0))
+            {
+                _saveError = "Not saved: fix the highlighted lines.";
+                return;
+            }
+
+            var header = await Sender.Send(new UpdateDraftHeaderCommand(
+                _model.Id, _clientId ?? _model.ClientId, _currency,
+                ToDateOnly(_issueDate), ToDateOnly(_dueDate), ToDateOnly(_validUntil), _notes, _terms, _methods));
+            if (!Report(header, showErrors)) return;
+
+            var lines = await Sender.Send(new UpsertDraftLinesCommand(_model.Id, _lines.Select(l =>
+                new DraftLineInput(l.Description, l.Detail, l.Quantity, l.UnitPrice, l.LineDiscount, l.TaxRateId, l.HsCode, l.CatalogueItemId)).ToList()));
+            if (!Report(lines, showErrors)) return;
+
+            var discount = await Sender.Send(new SetDocumentDiscountCommand(_model.Id, _discountKind, _discountKind == DiscountKind.None ? 0m : _discountValue));
+            if (!Report(discount, showErrors)) return;
+
+            _totals = discount.Value;
+            _dirty = false;
+            _savedAt = Clock.GetUtcNow();
+            await RefreshPreviewAsync();
+        }
+        finally
+        {
+            _busy = false;
+            _saveLock.Release();
+        }
+    }
+
+    private bool Report(InvoiceBuilder.Domain.Common.Result result, bool showErrors)
+    {
+        if (result.IsSuccess)
+        {
+            return true;
+        }
+
+        _saveError = $"Not saved: {result.Error.Message}";
+        if (showErrors)
+        {
+            Snackbar.Add(result.Error.Message, Severity.Error);
+        }
+
+        return false;
+    }
+
+    private void AddBlankLine() => Change(() => _lines.Add(new LineRow { Quantity = 1m }));
+
+    private void Move(int index, int delta) => Change(() =>
+    {
+        (_lines[index], _lines[index + delta]) = (_lines[index + delta], _lines[index]);
+    });
+
+    private async Task<IEnumerable<CatalogueSearchHit>> SearchCatalogueAsync(string? term, CancellationToken cancellationToken)
+    {
+        var result = await Sender.Send(new SearchCatalogueQuery(term), cancellationToken);
+        return result.IsSuccess ? result.Value : [];
+    }
+
+    private void AddFromCatalogue(CatalogueSearchHit? hit)
+    {
+        if (hit is null)
+        {
+            return;
+        }
+
+        if (hit.Currency != _currency)
+        {
+            Snackbar.Add($"{hit.Name} is priced in {(hit.Currency == "ZWG" ? "ZiG" : hit.Currency)}. Check the price for this {(_currency == "ZWG" ? "ZiG" : _currency)} document.", Severity.Warning);
+        }
+
+        Change(() => _lines.Add(new LineRow
+        {
+            Description = hit.Name, Detail = hit.Description, Quantity = 1m, UnitPrice = hit.UnitPrice,
+            TaxRateId = hit.TaxRateId, HsCode = hit.HsCode, CatalogueItemId = hit.Id,
+        }));
+    }
+
+    private void OnMethodsChanged(IReadOnlyCollection<AllowedPaymentMethods>? values) =>
+        Change(() => _methods = (values ?? []).Aggregate(AllowedPaymentMethods.None, (acc, m) => acc | m));
+
+    private void GeneratePlan()
+    {
+        if (_genFirstDate is null)
+        {
+            return;
+        }
+
+        var generated = InstalmentPlanner.Generate(_totals.Total, _genCount, _genFrequency, DateOnly.FromDateTime(_genFirstDate.Value), _genFirstKind);
+        if (generated.IsFailure)
+        {
+            Snackbar.Add(generated.Error.Message, Severity.Error);
+            return;
+        }
+
+        _plan = generated.Value.Select(d => new PlanRow { DueKind = d.DueKind, DueDate = ToDateTime(d.DueDate), Amount = d.Amount, Note = d.Note }).ToList();
+        _planDirty = true;
+    }
+
+    private async Task SavePlanAsync()
+    {
+        if (_model is null)
+        {
+            return;
+        }
+
+        await SaveAsync(showErrors: true);
+        _busy = true;
+        var drafts = _plan.Select(p => new InstalmentDraft(p.DueKind, ToDateOnly(p.DueDate), p.Amount, p.Note)).ToList();
+        var result = await Sender.Send(new SetInstalmentPlanCommand(_model.Id, drafts, _genFrequency));
+        _busy = false;
+        if (result.IsFailure)
+        {
+            Snackbar.Add(result.Error.Message, Severity.Error);
+            return;
+        }
+
+        _planDirty = false;
+        _savedAt = Clock.GetUtcNow();
+        Snackbar.Add("Payment plan saved.", Severity.Success);
+    }
+
+    private async Task ClearPlanAsync()
+    {
+        if (_model is null)
+        {
+            return;
+        }
+
+        if (_model.Instalments.Count == 0 && !_dirty)
+        {
+            _plan = [];
+            return;
+        }
+
+        _busy = true;
+        var result = await Sender.Send(new ClearInstalmentPlanCommand(_model.Id));
+        _busy = false;
+        if (result.IsFailure)
+        {
+            Snackbar.Add(result.Error.Message, Severity.Error);
+            return;
+        }
+
+        _plan = [];
+        _planDirty = false;
+        _savedAt = Clock.GetUtcNow();
+    }
+
+    private async Task DuplicateAsync()
+    {
+        if (_model is null)
+        {
+            return;
+        }
+
+        await SaveAsync(showErrors: true);
+        var result = await Sender.Send(new DuplicateDocumentCommand(_model.Id));
+        if (result.IsFailure)
+        {
+            Snackbar.Add(result.Error.Message, Severity.Error);
+            return;
+        }
+
+        Snackbar.Add("Copy created as a new draft.", Severity.Success);
+        Nav.NavigateTo($"{ListUrl}/{result.Value}");
+    }
+
+    private async Task LoadReceiptsAsync(DocumentEditorModel m)
+    {
+        var failures = m.IsEditable ? null : await Sender.Send(new InvoiceBuilder.Application.Messaging.GetSendFailuresQuery(m.Id));
+        _sendFailures = failures is { IsSuccess: true } ? failures.Value : [];
+
+        if (m.Type != DocumentType.Invoice || m.IsEditable)
+        {
+            _receipts = [];
+            return;
+        }
+
+        var result = await Sender.Send(new GetInvoiceReceiptsQuery(m.Id));
+        _receipts = result.IsSuccess ? result.Value : [];
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ReloadAsync()
+    {
+        if (_model is null)
+        {
+            return;
+        }
+
+        var reloaded = await Sender.Send(new GetDocumentForEditQuery(_model.Id));
+        if (reloaded.IsSuccess)
+        {
+            Apply(reloaded.Value);
+        }
+    }
+
+    private async Task CreditNoteAsync()
+    {
+        if (_model is null)
+        {
+            return;
+        }
+
+        var parameters = new DialogParameters<CreditNoteDialog> { { x => x.InvoiceId, _model.Id }, { x => x.Number, _model.Number ?? string.Empty }, { x => x.Total, _model.Totals.Total }, { x => x.Currency, _model.Currency } };
+        var dialog = await Dialogs.ShowAsync<CreditNoteDialog>("Issue a credit note", parameters);
+        var result = await dialog.Result;
+        if (result is { Canceled: false })
+        {
+            Snackbar.Add("Credit note issued.", Severity.Success);
+            await ReloadAsync();
+        }
+    }
+
+    private async Task ToggleRemindersAsync()
+    {
+        if (_model is null)
+        {
+            return;
+        }
+
+        var result = await Sender.Send(new InvoiceBuilder.Application.Messaging.SetRemindersPausedCommand(_model.Id, !_model.RemindersPaused));
+        if (result.IsFailure)
+        {
+            Snackbar.Add(result.Error.Message, Severity.Warning);
+            return;
+        }
+
+        await ReloadAsync();
+    }
+
+    private async Task RescheduleAsync()
+    {
+        if (_model is null)
+        {
+            return;
+        }
+
+        var current = _model.Instalments.Select(i => new InstalmentDraft(i.DueKind, i.DueDate, i.Amount, i.Note)).ToList();
+        var parameters = new DialogParameters<RescheduleDialog> { { x => x.InvoiceId, _model.Id }, { x => x.Currency, _model.Currency }, { x => x.Current, current } };
+        var dialog = await Dialogs.ShowAsync<RescheduleDialog>("Reschedule instalments", parameters);
+        var result = await dialog.Result;
+        if (result is { Canceled: false })
+        {
+            Snackbar.Add("Instalments rescheduled.", Severity.Success);
+            await ReloadAsync();
+            if (result.Data is true)
+            {
+                await OpenSendDialogAsync(null);
+            }
+        }
+    }
+
+    private static DateTime? ToDateTime(DateOnly? d) => d?.ToDateTime(TimeOnly.MinValue);
+
+    private static DateOnly? ToDateOnly(DateTime? d) => d is { } v ? DateOnly.FromDateTime(v) : null;
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_timer is not null)
+        {
+            await _timer.DisposeAsync();
+        }
+
+        _saveLock.Dispose();
+    }
+
+    private sealed class LineRow
+    {
+        public string Description { get; set; } = string.Empty;
+        public string? Detail { get; set; }
+        public decimal Quantity { get; set; }
+        public decimal UnitPrice { get; set; }
+        public decimal LineDiscount { get; set; }
+        public Guid? TaxRateId { get; set; }
+        public string? HsCode { get; set; }
+        public Guid? CatalogueItemId { get; set; }
+    }
+
+    private sealed class PlanRow
+    {
+        public InstalmentDueKind DueKind { get; set; }
+        public DateTime? DueDate { get; set; }
+        public decimal Amount { get; set; }
+        public string? Note { get; set; }
+    }
+}

@@ -1,0 +1,51 @@
+@page "/"
+@attribute [Microsoft.AspNetCore.Authorization.Authorize(Policy = "Staff")]
+@inject MediatR.ISender Sender
+
+<PageTitle>Dashboard · Invoice Builder</PageTitle>
+
+<h1 class="ib-page-title">Dashboard</h1>
+
+@if (_items is { Count: > 0 })
+{
+    <section aria-labelledby="needs-attention-heading">
+        <h2 id="needs-attention-heading">Needs attention</h2>
+        <ul class="ib-attention-list">
+            @foreach (var item in _items)
+            {
+                var id = item.Id;
+                <li>
+                    <strong>@item.Title</strong>
+                    <span>@item.Message</span>
+                    @if (item.LinkPath is not null)
+                    {
+                        <a href="@item.LinkPath">Open</a>
+                    }
+                    <MudButton Variant="Variant.Text" OnClick="() => DismissAsync(id)" aria-label="@($"Dismiss {item.Title}")">Dismiss</MudButton>
+                </li>
+            }
+        </ul>
+    </section>
+}
+else
+{
+    <EmptyState Title="Nothing to show yet" Message="Quotes, invoices and payments will appear here." />
+}
+
+@code {
+    private IReadOnlyList<InvoiceBuilder.Application.Notifications.NotificationRow>? _items;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync() =>
+        _items = await Sender.Send(new InvoiceBuilder.Application.Notifications.ListNeedsAttentionQuery());
+
+    private async Task DismissAsync(Guid id)
+    {
+        var result = await Sender.Send(new InvoiceBuilder.Application.Notifications.DismissNotificationCommand(id));
+        if (result.IsSuccess)
+        {
+            await LoadAsync();
+        }
+    }
+}

@@ -1,0 +1,67 @@
+using System.Security.Claims;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace InvoiceBuilder.Web.Security;
+
+/// <summary>Resource requirement for acting on one business (R2). The resource is the business id.</summary>
+public sealed class BusinessAccessRequirement : IAuthorizationRequirement;
+
+public sealed class BusinessAccessHandler : AuthorizationHandler<BusinessAccessRequirement, Guid>
+{
+    protected override Task HandleRequirementAsync(AuthorizationHandlerContext context, BusinessAccessRequirement requirement, Guid businessId)
+    {
+        if (context.User.IsInRole(Roles.Owner))
+        {
+            context.Succeed(requirement);
+        }
+        else if (context.User.IsInRole(Roles.Staff)
+            && context.User.FindAll(AppClaims.BusinessId).Any(c => Guid.TryParse(c.Value, out var id) && id == businessId))
+        {
+            context.Succeed(requirement);
+        }
+
+        return Task.CompletedTask;
+    }
+}
+
+public static class AuthorizationSetup
+{
+    public static IServiceCollection AddAppAuthorization(this IServiceCollection services)
+    {
+        services.AddSingleton<IAuthorizationHandler, BusinessAccessHandler>();
+        services.AddAuthorizationBuilder()
+            .AddPolicy(Policies.Owner, p => p.RequireAuthenticatedUser().RequireRole(Roles.Owner))
+            .AddPolicy(Policies.Staff, p => p.RequireAuthenticatedUser().RequireRole(Roles.Owner, Roles.Staff))
+            .AddPolicy(Policies.CanActOnBusiness, p => p.RequireAuthenticatedUser().AddRequirements(new BusinessAccessRequirement()));
+        return services;
+    }
+}
+
+/// <summary>An Owner must enrol an authenticator app before using the app (spec 5.1).</summary>
+public static class TwoFactorGate
+{
+    public const string SetupPath = "/account/2fa/setup";
+
+    public static bool MustEnrol(ClaimsPrincipal user) =>
+        user.Identity?.IsAuthenticated == true
+        && user.IsInRole(Roles.Owner)
+        && !user.HasClaim(AppClaims.TwoFactorEnrolled, "true");
+
+    public static bool IsAllowedWhileEnrolling(string path) =>
+        path.StartsWith(SetupPath, StringComparison.OrdinalIgnoreCase)
+        || path.StartsWith("/account/sign-out", StringComparison.OrdinalIgnoreCase)
+        || path.StartsWith("/_framework", StringComparison.OrdinalIgnoreCase)
+        || path.StartsWith("/_blazor", StringComparison.OrdinalIgnoreCase)
+        || path.StartsWith("/_content", StringComparison.OrdinalIgnoreCase)
+        || IsStaticAsset(path);
+
+    // Only real static files may load during enrolment, not any route that happens to contain a dot.
+    private static readonly string[] StaticExtensions = [".css", ".js", ".mjs", ".map", ".woff", ".woff2", ".ttf", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp"];
+
+    private static bool IsStaticAsset(string path)
+    {
+        var extension = Path.GetExtension(path);
+        return extension.Length > 0 && StaticExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase);
+    }
+}

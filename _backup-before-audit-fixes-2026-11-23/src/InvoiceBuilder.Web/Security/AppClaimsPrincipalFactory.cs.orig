@@ -1,0 +1,64 @@
+using System.Security.Claims;
+using InvoiceBuilder.Application.Abstractions;
+using InvoiceBuilder.Infrastructure.Persistence;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+
+namespace InvoiceBuilder.Web.Security;
+
+/// <summary>Adds tenant, business assignments, selected business and 2FA state to the signed-in principal.</summary>
+public sealed class AppClaimsPrincipalFactory(
+    UserManager<AppUser> userManager,
+    RoleManager<IdentityRole> roleManager,
+    IOptions<IdentityOptions> options,
+    AppDbContext db) : UserClaimsPrincipalFactory<AppUser, IdentityRole>(userManager, roleManager, options)
+{
+    public const string SelectedBusinessClaim = "ib:selected";
+
+    protected override async Task<ClaimsIdentity> GenerateClaimsAsync(AppUser user)
+    {
+        var identity = await base.GenerateClaimsAsync(user);
+        identity.AddClaim(new Claim(AppClaims.TenantId, user.TenantId.ToString()));
+
+        // Reviewed admin query: runs at sign-in, before any tenant scope exists.
+        var businessIds = await db.UserBusinesses.IgnoreQueryFilters()
+            .Where(u => u.UserId == user.Id)
+            .Select(u => u.BusinessId)
+            .ToListAsync();
+        foreach (var businessId in businessIds)
+        {
+            identity.AddClaim(new Claim(AppClaims.BusinessId, businessId.ToString()));
+        }
+
+        if (user.SelectedBusinessId is { } selected)
+        {
+            identity.AddClaim(new Claim(SelectedBusinessClaim, selected.ToString()));
+        }
+
+        if (user.TwoFactorEnabled)
+        {
+            identity.AddClaim(new Claim(AppClaims.TwoFactorEnrolled, "true"));
+        }
+
+        return identity;
+    }
+}
+
+/// <summary>Signed-in user tenant, business and identity for the request. A webhook override wins when set.</summary>
+public sealed class WebCurrentScope(IHttpContextAccessor accessor, RequestScope requestScope, CircuitUserAccessor circuit) : ICurrentTenant, ICurrentBusiness, ICurrentUser
+{
+    private ClaimsPrincipal? User => circuit.User ?? accessor.HttpContext?.User;
+
+    public Guid TenantId =>
+        requestScope.OverrideTenantId
+        ?? (Guid.TryParse(User?.FindFirstValue(AppClaims.TenantId), out var tenant) ? tenant : Guid.Empty);
+
+    public Guid? BusinessId =>
+        requestScope.BusinessId
+        ?? (Guid.TryParse(User?.FindFirstValue(AppClaimsPrincipalFactory.SelectedBusinessClaim), out var business) ? business : null);
+
+    public string? UserId => User?.FindFirstValue(ClaimTypes.NameIdentifier);
+
+    public string Label => User?.Identity?.Name ?? "System";
+}

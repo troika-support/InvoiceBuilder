@@ -1,0 +1,53 @@
+using System.Net;
+
+namespace InvoiceBuilder.Application.Messaging;
+
+public sealed record EmailContent(string Subject, string Html, string Text)
+{
+    /// <summary>Document-sent email (HTML and text). Every bound value is encoded in the HTML.</summary>
+    public static EmailContent Document(string clientName, string number, string amount, string link, string? message)
+    {
+        ArgumentNullException.ThrowIfNull(clientName);
+        var subject = $"{number} · {amount}";
+        var note = string.IsNullOrWhiteSpace(message) ? string.Empty : message.Trim();
+        var text = $"Hi {clientName},\n\n{(note.Length > 0 ? note + "\n\n" : string.Empty)}Here is {number} for {amount}.\nView it online: {link}\n\nThe PDF is attached.";
+        var html =
+            $"<p>Hi {WebUtility.HtmlEncode(clientName)},</p>" +
+            (note.Length > 0 ? $"<p>{WebUtility.HtmlEncode(note)}</p>" : string.Empty) +
+            $"<p>Here is <strong>{WebUtility.HtmlEncode(number)}</strong> for <strong>{WebUtility.HtmlEncode(amount)}</strong>.</p>" +
+            $"<p><a href=\"{WebUtility.HtmlEncode(link)}\" style=\"display:inline-block;min-height:44px;padding:12px 20px;background:#F59E0B;color:#111111;font-weight:600;border-radius:8px;text-decoration:none\">View {WebUtility.HtmlEncode(number)}</a></p>" +
+            "<p>The PDF is attached.</p>";
+        return new EmailContent(subject, html, text);
+    }
+
+    public static EmailContent Receipt(string clientName, string number, string amount, string link) =>
+        Simple($"Receipt for {number}", clientName, $"Thank you. We received {amount} for {number}.", "View receipt", link);
+
+    public static EmailContent Reminder(string clientName, string number, string amount, string dueDate, string link) =>
+        Simple($"Reminder: {number} due {dueDate}", clientName, $"{number} for {amount} is due on {dueDate}.", $"View {number}", link);
+
+    public static EmailContent InstalmentReminder(string clientName, string number, string amount, string dueDate, string link) =>
+        Simple($"Instalment due {dueDate} · {number}", clientName, $"An instalment of {amount} for {number} is due on {dueDate}.", $"View {number}", link);
+
+    public static EmailContent ReminderNote(string clientName, string number, string note, string link, bool instalment) =>
+        Simple(instalment ? $"Instalment reminder · {number}" : $"Reminder: {number}", clientName, $"{note}.", $"View {number}", link);
+
+    public static EmailContent PlanRescheduled(string clientName, string number, string link) =>
+        Simple($"Payment plan updated · {number}", clientName, $"The payment plan for {number} has been updated. See the new dates online.", "View payment plan", link);
+
+    public static EmailContent QuoteAccepted(string ownerName, string number, string clientName, string link) =>
+        Simple($"Quote {number} accepted", ownerName, $"{clientName} accepted quote {number}.", $"View {number}", link);
+
+    public static EmailContent RecurringDraftsReady(string ownerName, int count, string link) =>
+        Simple($"{count} recurring draft{(count == 1 ? string.Empty : "s")} ready", ownerName, $"{count} recurring draft{(count == 1 ? " is" : "s are")} ready to review.", "Review drafts", link);
+
+    private static EmailContent Simple(string subject, string recipient, string line, string action, string link)
+    {
+        var text = $"Hi {recipient},\n\n{line}\n{action}: {link}";
+        var html =
+            $"<p>Hi {WebUtility.HtmlEncode(recipient)},</p>" +
+            $"<p>{WebUtility.HtmlEncode(line)}</p>" +
+            $"<p><a href=\"{WebUtility.HtmlEncode(link)}\" style=\"display:inline-block;min-height:44px;padding:12px 20px;background:#F59E0B;color:#111111;font-weight:600;border-radius:8px;text-decoration:none\">{WebUtility.HtmlEncode(action)}</a></p>";
+        return new EmailContent(subject, html, text);
+    }
+}

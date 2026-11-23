@@ -1,0 +1,98 @@
+@using InvoiceBuilder.Application.Messaging
+@inject MediatR.ISender Sender
+@inject InvoiceBuilder.Web.Services.LiveAnnouncer Announcer
+
+<MudDialog aria-labelledby="send-title">
+    <TitleContent>
+        <h2 id="send-title" class="ib-section-title">Send @Number</h2>
+    </TitleContent>
+    <DialogContent>
+        @if (_formError is not null)
+        {
+            <MudAlert Severity="Severity.Error" role="alert" Class="mb-4">@_formError</MudAlert>
+        }
+        <MudCheckBox T="bool" @bind-Value="_email" Color="Color.Primary" Label="Email (PDF attached, with link)" />
+        @if (_email)
+        {
+            <MudTextField @bind-Value="_emailTo" Label="Email address" InputType="InputType.Email" Variant="Variant.Outlined" Class="mb-3"
+                          UserAttributes="@(new Dictionary<string, object?> { ["autocomplete"] = "email" })" />
+        }
+        <MudCheckBox T="bool" @bind-Value="_whatsApp" Color="Color.Primary" Label="WhatsApp (template message with link)" />
+        @if (_whatsApp)
+        {
+            <MudTextField @bind-Value="_whatsAppTo" Label="WhatsApp number" InputType="InputType.Telephone" Variant="Variant.Outlined" Class="mb-3"
+                          HelperText="Include the country code, e.g. +263 77 123 4567." />
+        }
+        <MudTextField @bind-Value="_message" Label="Message (optional)" Lines="3" MaxLength="1000" Variant="Variant.Outlined" />
+        <h3 class="ib-section-title mt-4">Preview</h3>
+        <div class="ib-card" style="padding: 12px 16px;" aria-live="polite">
+            <p><strong>@_preview.Subject</strong></p>
+            <p style="white-space: pre-wrap;">@_preview.Text</p>
+        </div>
+        <p class="ib-help mt-2">The client link in this message replaces any link sent earlier, so the old link stops working.</p>
+    </DialogContent>
+    <DialogActions>
+        <MudButton Variant="Variant.Text" OnClick="Cancel" Disabled="_saving">Cancel</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SendAsync" Disabled="_saving">Send</MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] private IMudDialogInstance Dialog { get; set; } = default!;
+
+    [Parameter] public Guid DocumentId { get; set; }
+
+    [Parameter] public string Number { get; set; } = string.Empty;
+
+    [Parameter] public string Amount { get; set; } = string.Empty;
+
+    [Parameter] public string ClientName { get; set; } = string.Empty;
+
+    [Parameter] public string? ClientEmail { get; set; }
+
+    [Parameter] public string? ClientPhone { get; set; }
+
+    [Parameter] public string? LinkToken { get; set; }
+
+    private bool _email;
+    private bool _whatsApp;
+    private string? _emailTo;
+    private string? _whatsAppTo;
+    private string? _message;
+    private string? _formError;
+    private bool _saving;
+
+    private EmailContent _preview => EmailContent.Document(ClientName, Number, Amount, "[client link]", _message);
+
+    protected override void OnInitialized()
+    {
+        _emailTo = ClientEmail;
+        _whatsAppTo = ClientPhone;
+        _email = !string.IsNullOrWhiteSpace(ClientEmail);
+        _whatsApp = !_email && !string.IsNullOrWhiteSpace(ClientPhone);
+    }
+
+    private void Cancel() => Dialog.Cancel();
+
+    private async Task SendAsync()
+    {
+        _saving = true;
+        _formError = null;
+        try
+        {
+            var result = await Sender.Send(new SendDocumentCommand(DocumentId, _email ? _emailTo : null, _whatsApp ? _whatsAppTo : null, _message, LinkToken));
+            if (result.IsFailure)
+            {
+                _formError = result.Error.Message;
+                Announcer.Announce(result.Error.Message);
+                return;
+            }
+
+            Dialog.Close(DialogResult.Ok(result.Value));
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+}
